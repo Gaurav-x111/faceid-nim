@@ -24,6 +24,7 @@ const IFACE = `
       <arg type="b" direction="out"/>
       <arg type="s" direction="out"/>
     </method>
+    <method name="PreviewAnimation"><arg type="s" direction="in"/></method>
     <method name="Retry"/>
   </interface>
 </node>`;
@@ -102,6 +103,22 @@ export class DaemonClient {
         } catch (e) {
             logError(e, 'faceid@nim: TestScan');
             return Promise.resolve([false, String(e)]);
+        }
+    }
+
+    // Developer-only preview: asks the daemon to play the full success
+    // sequence (scan -> ring -> check -> Verified -> Welcome -> name)
+    // with no camera and no auth. Signals-only, so it can never unlock
+    // anything; used to tune the animation without standing at the screen.
+    preview(userId = '') {
+        if (!this._proxy)
+            return Promise.resolve(false);
+        try {
+            return this._proxy.PreviewAnimation(
+                String(userId).slice(0, 24)).then(() => true, () => false);
+        } catch (e) {
+            logError(e, 'faceid@nim: PreviewAnimation');
+            return Promise.resolve(false);
         }
     }
 

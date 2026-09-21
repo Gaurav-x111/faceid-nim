@@ -12,11 +12,13 @@
 use crate::config::Config;
 use crate::session::{Engine, ScanState};
 use crate::store::{Identity, Store};
+use crate::worker::Progress;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use zbus::{interface, object_server::SignalContext, zvariant, Connection};
 
@@ -188,13 +190,36 @@ impl Daemon1 {
     /// Run a scan and report the result without unlocking anything.
     /// A direct worker scan on purpose: it must work even when faceid
     /// is disabled or the service list has no "test" entry, and it must
-    /// never touch the failure counter or the PAM decision path.
+    /// never touch the failure counter or the PAM decision path. It
+    /// still drives the pill's ScanState (waking → searching →
+    /// verifying with live progress, then matched or rejected), so the
+    /// whole success sequence plays from the settings app exactly as it
+    /// does at a real unlock — the only difference is that nothing was
+    /// unlocked.
     async fn test_scan(
         &self,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(bool, String)> {
         let uid = self.caller_uid(&hdr).await?;
         let cfg = self.cfg.lock().await.clone();
+        let stx = self.engine.state_tx.clone();
+
+        let _ = stx.send((ScanState::Waking, 0.0, String::new())).await;
+        let _ = stx.send((ScanState::Searching, 0.05, String::new())).await;
+
+        let (ptx, mut prx) = mpsc::channel::<Progress>(16);
+        let pump_stx = stx.clone();
+        let pump = tokio::spawn(async move {
+            while let Some(ev) = prx.recv().await {
+                let msg = match ev {
+                    Progress::FaceFound => (ScanState::Verifying, 0.15, String::new()),
+                    Progress::Value(p) => (ScanState::Verifying, p, String::new()),
+                    Progress::Challenge(p) => (ScanState::Searching, 0.1, p),
+                };
+                let _ = pump_stx.send(msg).await;
+            }
+        });
+
         let ev = self
             .engine
             .worker
@@ -204,19 +229,81 @@ impl Daemon1 {
                 "off",
                 cfg.scan_timeout_ms,
                 false,
-                None,
+                Some(ptx),
                 None,
                 cfg.ir_camera.clone(),
                 None,
             )
             .await;
+        pump.abort();
+
         match ev {
-            Ok(e) => Ok((
-                !e.embeddings.is_empty(),
-                format!("captured {} embeddings", e.embeddings.len()),
-            )),
-            Err(e) => Ok((false, e.to_string())),
+            Ok(e) if !e.embeddings.is_empty() => {
+                // Play the success animation. "Test scan" is what the
+                // pill greets — this is a diagnostic, not an unlock.
+                let _ = stx.send((ScanState::Matched, 1.0, "Test scan".to_string())).await;
+                Ok((
+                    true,
+                    format!("captured {} embeddings", e.embeddings.len()),
+                ))
+            }
+            Ok(_) => {
+                let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
+                Ok((false, "no face captured".to_string()))
+            }
+            Err(e) => {
+                let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
+                Ok((false, e.to_string()))
+            }
         }
+    }
+
+    /// Developer-only preview: plays the full success sequence on the
+    /// pill with NO camera, NO scan, NO template read and NO auth
+    /// decision. It only emits ScanState signals, so a call can never
+    /// unlock anything, touch the failure counter or change a setting.
+    /// The requested identity name is sanitised and merely shown in the
+    /// greeting; it is never trusted for anything.
+    async fn preview_animation(
+        &self,
+        user: String,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let _uid = self.caller_uid(&hdr).await?;
+        let name: String = user
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(24)
+            .collect();
+        let ctxt = SignalContext::new(&self.conn, "/org/faceidnim/Daemon1")
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        tokio::spawn(async move {
+            // A deterministic WAKING -> SEARCHING -> VERIFYING (ramp) ->
+            // MATCHED timeline. The pill drives everything that follows
+            // (check, Verified, Welcome, identity) off the matched event.
+            let mut emit = |state: &str, progress: f64, reason: &str| {
+                let ctxt = &ctxt;
+                let reason = reason.to_string();
+                let state = state.to_string();
+                async move {
+                    let _ = Daemon1::scan_state(ctxt, &state, progress, &reason).await;
+                }
+            };
+            let _ = emit("waking", 0.0, "").await;
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            let _ = emit("searching", 0.05, "").await;
+            tokio::time::sleep(Duration::from_millis(130)).await;
+            for (progress, delay_ms) in
+                [(0.15f64, 0u64), (0.45f64, 240u64), (0.78f64, 470u64), (0.95f64, 620u64)]
+            {
+                let _ = emit("verifying", progress, "").await;
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            let _ = emit("matched", 1.0, &name).await;
+            // The pill contracts on its own clock; nothing more to say.
+        });
+        Ok(())
     }
 
     async fn get_settings(&self) -> zbus::fdo::Result<String> {

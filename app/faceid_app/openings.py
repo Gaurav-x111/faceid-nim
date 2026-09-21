@@ -54,6 +54,12 @@ def variant_dir(variant_id: str) -> str:
 
 EASINGS = ["outCubic", "outBack", "outExpo"]
 
+# Which scan-face the unlock pill draws. "arena" is the default premium
+# scanner (halo + crest + dotted rings + beam + particles); "classic"
+# is the original ring/sweep/face pill.
+SCAN_FACES = ["arena", "classic"]
+DEFAULT_SCAN_FACE = "arena"
+
 BUILTIN = {
     "logo": {
         "kind": "builtin",
@@ -118,7 +124,7 @@ def _clean_spec(entry: dict) -> dict:
 # -- config -------------------------------------------------------------
 
 def default_config() -> dict:
-    return {"active": "logo", "variants": {}}
+    return {"active": "logo", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
 
 
 def load() -> dict:
@@ -137,6 +143,8 @@ def load() -> dict:
         }
         active = str(data.get("active", "logo"))
         cfg["active"] = active if active in all_ids(cfg) else "logo"
+        face = str(data.get("scan_face", DEFAULT_SCAN_FACE))
+        cfg["scan_face"] = face if face in SCAN_FACES else DEFAULT_SCAN_FACE
     except (OSError, ValueError):
         pass
     return cfg
@@ -148,7 +156,7 @@ def save(cfg: dict) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({k: cfg[k] for k in ("active", "variants")},
+            json.dump({k: cfg[k] for k in ("active", "variants", "scan_face")},
                       f, indent=2)
         os.replace(tmp, path)
     except OSError:
@@ -174,6 +182,15 @@ def set_active(cfg: dict, variant_id: str) -> bool:
     if variant_id not in all_ids(cfg):
         return False
     cfg["active"] = variant_id
+    save(cfg)
+    return True
+
+
+def set_scan_face(cfg: dict, face: str = DEFAULT_SCAN_FACE) -> bool:
+    """Pick the pill's scan-face style ('arena' | 'classic')."""
+    if face not in SCAN_FACES:
+        return False
+    cfg["scan_face"] = face
     save(cfg)
     return True
 

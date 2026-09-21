@@ -3,6 +3,12 @@ Description=faceid-nim privileged face unlock daemon
 Documentation=https://github.com/Gaurav-x111/faceid-nim
 After=dbus.service
 Requires=dbus.service
+# Bring the vision worker along on start. The worker unit
+# Requires/After/PartOf this unit, so it is stopped and restarted with
+# the daemon too -- without this Wants, a plain `stop` + `start` of the
+# daemon leaves the worker dead and the app reports the worker as
+# unreachable.
+Wants=faceid-vision.service
 
 [Service]
 Type=simple

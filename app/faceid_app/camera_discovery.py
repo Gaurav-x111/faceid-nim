@@ -134,10 +134,18 @@ class CameraInfo:
     readable: bool = False
     busy: bool = False
     probe_error: str = ""
+    # Set when this /dev/videoN is an alternate node of an RGB sensor
+    # (same card, mono-only formats).  It is NOT an IR camera — a mono
+    # node on the same physical webcam is just another tune of that
+    # sensor (e.g. a GREY exposure/viewport enum), so it must never be
+    # treated as an IR device.
+    alt_of_rgb: bool = False
 
     @property
     def kind(self) -> str:
         """'ir', 'rgb', or 'none' — classification used by the app."""
+        if self.alt_of_rgb:
+            return "none"
         mono = any(f.fivecc in MONO_FIVECC for f in self.formats)
         color = any(f.fivecc not in MONO_FIVECC for f in self.formats)
         name = self.card.lower()
@@ -296,6 +304,33 @@ def probe(path: str) -> CameraInfo:
     return info
 
 
+def _dedupe_same_sensor(cams: list[CameraInfo]) -> list[CameraInfo]:
+    """Flag mono-only nodes that share a card with a color node.
+
+    A single physical webcam can expose several /dev/videoN nodes (one
+    colour, one Y16/GREY metadata stream, ...).  Those alternate nodes
+    carry the same V4L2 card string as the colour node, so a mono-only
+    member of such a group is an alternate tune of the SAME RGB sensor,
+    never an IR camera.  Marking them alt_of_rgb keeps auto mode from
+    planning an IR mode on machines that have no IR hardware at all.
+    """
+    groups: dict[str, list[CameraInfo]] = {}
+    for c in cams:
+        if c.readable and c.card.strip():
+            groups.setdefault(c.card.strip(), []).append(c)
+    for group in groups.values():
+        has_color = any(
+            any(f.fivecc not in MONO_FIVECC for f in c.formats)
+            for c in group
+        )
+        if not has_color:
+            continue
+        for c in group:
+            if c.formats and all(f.fivecc in MONO_FIVECC for f in c.formats):
+                c.alt_of_rgb = True
+    return cams
+
+
 def discover() -> list[CameraInfo]:
     """Enumerate every /dev/videoN node in index order."""
     out: list[CameraInfo] = []
@@ -312,7 +347,7 @@ def discover() -> list[CameraInfo]:
         missing = 0
         out.append(probe(path))
         n += 1
-    return out
+    return _dedupe_same_sensor(out)
 
 
 def pick(cameras: list[CameraInfo]) -> dict:

@@ -57,8 +57,20 @@ class Daemon:
         self._call("SetIdentityEnabled", GLib.Variant("(sb)", (name, enabled)))
 
     def test_scan(self) -> tuple[bool, str]:
+        """Run a real scan (no unlock, no failure counter). The daemon
+        also drives the lock pill through the full sequence — scanning
+        with live progress, then ring/check/Verified/Welcome — so the
+        test doubles as an animation preview using the real camera."""
         ok, msg = self._call("TestScan")
         return bool(ok), str(msg)
+
+    def preview_animation(self, identity: str = "") -> None:
+        """Developer-only: play the full success animation on the lock
+        pill -- scan, ring, check, Verified, Welcome, identity -- with
+        no camera and no authentication. The daemon only emits ScanState
+        signals; it can never unlock anything.
+        """
+        self._call("PreviewAnimation", GLib.Variant("(s)", (identity,)))
 
     def start_preview(self) -> int:
         """Open a view-only camera stream (unprivileged).

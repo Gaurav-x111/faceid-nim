@@ -346,8 +346,10 @@ class Window(Adw.ApplicationWindow):
         row.add_suffix(btn)
         actions.add(row)
 
-        test = Adw.ActionRow(title="Test a scan",
-                             subtitle="Runs a real scan without unlocking anything")
+        test = Adw.ActionRow(
+            title="Test a scan",
+            subtitle="Runs a real scan and plays the full unlock "
+                     "animation — without unlocking anything")
         tbtn = Gtk.Button(label="Test", valign=Gtk.Align.CENTER)
         tbtn.connect("clicked", self.on_test)
         test.add_suffix(tbtn)
@@ -723,10 +725,14 @@ class Window(Adw.ApplicationWindow):
         self._update_camera_ui(plan)
 
         # Push the resolved mode/devices to the daemon whenever the live
-        # discovery disagrees with what it currently has configured.
-        if s.get("mode") != plan["mode"] or \
-           str(s.get("camera") or "") != str(plan["camera"] or "") or \
-           str(s.get("ir_camera") or "") != str(plan["ir_camera"] or ""):
+        # discovery disagrees with what it currently has configured. Only
+        # do this while the worker is healthy: a degraded discovery plan
+        # computed during a worker outage (e.g. a failed /dev/video probe)
+        # must never overwrite the daemon's working config.
+        if bool(diag.get("worker_reachable")) and \
+           (s.get("mode") != plan["mode"] or \
+            str(s.get("camera") or "") != str(plan["camera"] or "") or \
+            str(s.get("ir_camera") or "") != str(plan["ir_camera"] or "")):
             self._push_plan(plan)
 
         worker_up = bool(diag.get("worker_reachable"))
@@ -786,6 +792,38 @@ class Window(Adw.ApplicationWindow):
         prev.append(self.preview_label)
         sel.add(prev)
         page.add(sel)
+
+        faceg = Adw.PreferencesGroup(
+            title="Scanner",
+            description="Which face scanner draws inside the pill. Both "
+                        "shapes share the same timing, spring and "
+                        "Verified → Welcome sequence — this only picks "
+                        "the look.")
+        self.cb_scan_face = Adw.ComboRow(
+            title="Scan face",
+            subtitle="Arena (premium halo/crest) or the classic sweep",
+            model=Gtk.StringList.new(["Arena (default)", "Classic"]))
+        self.cb_scan_face.connect("notify::selected",
+                                  self.on_scan_face_selected)
+        faceg.add(self.cb_scan_face)
+        page.add(faceg)
+
+        pvgroup = Adw.PreferencesGroup(
+            title="Preview",
+            description="Watch the full Verified → Welcome sequence on the "
+                        "lock pill right now. No camera and no "
+                        "authentication — a developer preview only, so you "
+                        "can tune the animation without standing at the "
+                        "screen.")
+        prow = Adw.ActionRow(
+            title="Preview success animation",
+            subtitle="Ring sweep, check, Verified, Welcome, identity")
+        pb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
+        pb.add_css_class("suggested-action")
+        pb.connect("clicked", self._preview_success)
+        prow.add_suffix(pb)
+        pvgroup.add(prow)
+        page.add(pvgroup)
 
         make = Adw.PreferencesGroup(title="Make your own")
         row = Adw.ActionRow(
@@ -850,11 +888,19 @@ class Window(Adw.ApplicationWindow):
             parts.append(f'“{s["text"]}”')
         return " · ".join(parts)
 
+    def on_scan_face_selected(self, row, _param=None):
+        face = "classic" if row.get_selected() == 1 else "arena"
+        self._openings["scan_face"] = face
+        openings.save(self._openings)
+        logging.getLogger("faceid_app").info("scan face set to %s", face)
+
     def _refresh_openings(self) -> None:
         cfg = self._openings
         ids = openings.all_ids(cfg)
 
         self._suspend_changes = True
+        self.cb_scan_face.set_selected(
+            1 if cfg.get("scan_face", "arena") == "classic" else 0)
         names = []
         for vid in ids:
             s = openings.spec(cfg, vid) or {}
@@ -944,6 +990,32 @@ class Window(Adw.ApplicationWindow):
                 s = openings.spec(self._openings, vid) or {}
                 self.toast(f"Opening animation: {s.get('name') or vid} "
                            "(next lock)")
+
+    def _preview_success(self, _b=None) -> None:
+        """Developer-only: ask the daemon to play the full success
+        sequence on the lock pill (ring, check, Verified, Welcome,
+        identity). The daemon only emits ScanState -- it can never
+        unlock anything or touch a decision path."""
+
+        def run():
+            identity = ""
+            try:
+                for name, enabled, _model in self.daemon.list_identities():
+                    if enabled:
+                        identity = name
+                        break
+                self.daemon.preview_animation(identity)
+                return None
+            except Exception:
+                return "unavailable"
+
+        def then(res):
+            if res is None:
+                self.toast("Success animation previewing now")
+            else:
+                self.toast("Preview unavailable — is the daemon up to date?")
+
+        self._thread(run, then)
 
     def _thread(self, fn, then) -> None:
         """Run blocking work off the UI thread, then apply on the main one."""
@@ -1524,12 +1596,23 @@ class Window(Adw.ApplicationWindow):
         dlg.present(self)
 
     def on_test(self, _b) -> None:
-        try:
-            ok, msg = self.daemon.test_scan()
-        except DaemonError as e:
-            self.toast(str(e))
-            return
-        self.toast("Recognised" if ok else (msg or "Not recognised"))
+        # Off the UI thread: the daemon drives the full scan + success
+        # animation on the pill while this call is in flight, and the
+        # window must keep responding.
+        def run():
+            try:
+                return self.daemon.test_scan()
+            except DaemonError as e:
+                return (False, str(e))
+
+        def then(res):
+            try:
+                ok, msg = res
+            except (TypeError, ValueError):
+                ok, msg = False, "Daemon unreachable"
+            self.toast("Recognised" if ok else (msg or "Not recognised"))
+
+        self._thread(run, then)
 
     def on_camera_test(self, _b) -> None:
         self._open_camera_test(None)
