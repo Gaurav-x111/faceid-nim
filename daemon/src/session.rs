@@ -91,15 +91,17 @@ impl Engine {
         let t0 = Instant::now();
         let no_cues: Vec<String> = Vec::new();
 
-        let note_f32 = |notes: &Option<&serde_json::Map<String, serde_json::Value>>,
-                        key: &str| {
+        let note_f32 = |notes: &Option<&serde_json::Map<String, serde_json::Value>>, key: &str| {
             notes
                 .and_then(|m| m.get(key))
                 .and_then(|v| v.as_f64())
                 .map(|v| v as f32)
         };
 
-        let log = |result: &str, reason: &str, cues: &[String], strict: &str,
+        let log = |result: &str,
+                   reason: &str,
+                   cues: &[String],
+                   strict: &str,
                    notes: Option<&serde_json::Map<String, serde_json::Value>>,
                    valid: u64| {
             self.audit.log(Event {
@@ -118,7 +120,14 @@ impl Engine {
         };
 
         if !cfg.enabled {
-            log("refused", "disabled", &no_cues, cfg.strictness.as_str(), None, 0);
+            log(
+                "refused",
+                "disabled",
+                &no_cues,
+                cfg.strictness.as_str(),
+                None,
+                0,
+            );
             return AuthOutcome::unavailable(Verdict::Disabled.user_message());
         }
         if !cfg.service_allowed(service) {
@@ -135,7 +144,14 @@ impl Engine {
         {
             let mut pol = self.policy.lock().await;
             if pol.check(uid, cfg.max_failures) == Verdict::LockedOut {
-                log("refused", "locked_out", &no_cues, cfg.strictness.as_str(), None, 0);
+                log(
+                    "refused",
+                    "locked_out",
+                    &no_cues,
+                    cfg.strictness.as_str(),
+                    None,
+                    0,
+                );
                 return AuthOutcome::deny(Verdict::LockedOut.user_message());
             }
         }

@@ -202,7 +202,8 @@ mod tests {
         let c = parse(concat!(
             "mode = \"hybrid\"\n",
             "rgb_device = \"/dev/video1\"\n",
-            "ir_device = \"/dev/video3\"\n"));
+            "ir_device = \"/dev/video3\"\n"
+        ));
         assert_eq!(c.mode, CameraMode::Hybrid);
         assert_eq!(c.camera, "/dev/video1");
         assert_eq!(c.ir_camera.as_deref(), Some("/dev/video3"));
@@ -214,7 +215,8 @@ mod tests {
         // installed config never silently changes behaviour.
         let c = parse(concat!(
             "camera = \"/dev/video0\"\n",
-            "ir_camera = \"/dev/video2\"\n"));
+            "ir_camera = \"/dev/video2\"\n"
+        ));
         assert_eq!(c.camera, "/dev/video0");
         assert_eq!(c.ir_camera.as_deref(), Some("/dev/video2"));
         assert_eq!(c.mode, CameraMode::Rgb); // default unchanged

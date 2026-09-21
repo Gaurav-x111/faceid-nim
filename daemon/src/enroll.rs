@@ -95,9 +95,7 @@ impl Session {
             return;
         }
         if file.write_all(b"J").is_err()
-            || file
-                .write_all(&(jpeg.len() as u32).to_be_bytes())
-                .is_err()
+            || file.write_all(&(jpeg.len() as u32).to_be_bytes()).is_err()
             || file.write_all(jpeg).is_err()
         {
             // Reader went away, or the pipe filled. Drop it.
@@ -247,7 +245,11 @@ async fn require_polkit(
     );
     let subject = ("system-bus-name".to_string(), subject_properties);
 
-    eprintln!("[polkit] action_id={:?} subject=system-bus-name:{}", action, sender.as_str());
+    eprintln!(
+        "[polkit] action_id={:?} subject=system-bus-name:{}",
+        action,
+        sender.as_str()
+    );
 
     let authority = AuthorityProxy::new(conn)
         .await
@@ -260,15 +262,18 @@ async fn require_polkit(
 
     match &result {
         Ok((authorized, challenge, details)) => {
-            eprintln!("[polkit] authorized={} challenge={:?} details={:?}", authorized, challenge, details);
+            eprintln!(
+                "[polkit] authorized={} challenge={:?} details={:?}",
+                authorized, challenge, details
+            );
         }
         Err(e) => {
             eprintln!("[polkit] ERROR: {:?}", e);
         }
     }
 
-    let (authorized, _, _) = result
-        .map_err(|e| zbus::fdo::Error::Failed(format!("polkit: {e}")))?;
+    let (authorized, _, _) =
+        result.map_err(|e| zbus::fdo::Error::Failed(format!("polkit: {e}")))?;
 
     if authorized {
         Ok(())
