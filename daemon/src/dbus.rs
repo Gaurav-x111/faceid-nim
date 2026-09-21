@@ -241,11 +241,10 @@ impl Daemon1 {
             Ok(e) if !e.embeddings.is_empty() => {
                 // Play the success animation. "Test scan" is what the
                 // pill greets — this is a diagnostic, not an unlock.
-                let _ = stx.send((ScanState::Matched, 1.0, "Test scan".to_string())).await;
-                Ok((
-                    true,
-                    format!("captured {} embeddings", e.embeddings.len()),
-                ))
+                let _ = stx
+                    .send((ScanState::Matched, 1.0, "Test scan".to_string()))
+                    .await;
+                Ok((true, format!("captured {} embeddings", e.embeddings.len())))
             }
             Ok(_) => {
                 let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
@@ -270,11 +269,7 @@ impl Daemon1 {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _uid = self.caller_uid(&hdr).await?;
-        let name: String = user
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(24)
-            .collect();
+        let name: String = user.chars().filter(|c| !c.is_control()).take(24).collect();
         let ctxt = SignalContext::new(&self.conn, "/org/faceidnim/Daemon1")
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
@@ -294,9 +289,12 @@ impl Daemon1 {
             tokio::time::sleep(Duration::from_millis(90)).await;
             let _ = emit("searching", 0.05, "").await;
             tokio::time::sleep(Duration::from_millis(130)).await;
-            for (progress, delay_ms) in
-                [(0.15f64, 0u64), (0.45f64, 240u64), (0.78f64, 470u64), (0.95f64, 620u64)]
-            {
+            for (progress, delay_ms) in [
+                (0.15f64, 0u64),
+                (0.45f64, 240u64),
+                (0.78f64, 470u64),
+                (0.95f64, 620u64),
+            ] {
                 let _ = emit("verifying", progress, "").await;
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
