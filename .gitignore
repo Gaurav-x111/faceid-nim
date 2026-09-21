@@ -1,0 +1,9 @@
+target/
+dist/
+__pycache__/
+*.pyc
+*.so
+*.onnx
+eval/out/
+eval/data/
+.venv/

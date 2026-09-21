@@ -1,0 +1,48 @@
+# Every model is pinned by SHA-256. The daemon and worker refuse to
+# load a file whose hash does not match, because a swapped recognition
+# model is a silent authentication bypass.
+#
+# IMPORTANT, AND UNRESOLVED: the sha256 values below are PLACEHOLDERS.
+# Fill them in from the files you actually download, and read each
+# license before bundling anything in a public .deb.
+#
+# Known licensing situation as far as I can tell (verify it yourself,
+# this is not legal advice):
+#   - OpenCV Zoo YuNet and SFace: permissive, believed safe to ship.
+#   - InsightFace pretrained ArcFace models: restricted to
+#     non-commercial research use. Do NOT put them in a public package
+#     without checking.
+#   - MediaPipe Face Mesh: Apache-2.0 code, but check the model card.
+#   - Silent-Face-Anti-Spoofing MiniFASNet: check the repository terms.
+
+[model.detector]
+file = "face_detection_yunet_2023mar.onnx"
+url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+sha256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+license = "MIT (verify)"
+model_id = "yunet_2023mar"
+
+[model.recognizer]
+file = "face_recognition_sface_2021dec.onnx"
+url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+sha256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+license = "Apache-2.0 (verify)"
+# Changing model_id invalidates every enrolled template on purpose:
+# embeddings from different models are not comparable.
+model_id = "sface_2021dec"
+input_size = [112, 112]
+embedding_dim = 128
+
+[model.antispoof]
+file = "minifasnet_v2.onnx"
+# The MiniFASNet checkpoints ship with the source repo (test_data +
+# pre-trained .pth); the v2 ONNX export used by this project is not
+# published at a stable URL today, so this model is OPTIONAL at load
+# time (build_engine already treats a missing/refused antispoof as
+# spoof-path=None). Fetch or convert it separately, then pin its hash
+# here. Leave it out of pinning until you have the exact artifact.
+url = ""
+sha256 = ""
+license = "verify before shipping"
+model_id = "minifasnet_v2"
+input_size = [80, 80]

@@ -1,0 +1,15 @@
+#!/bin/sh
+# faceid-nim settings app launcher.
+#
+# The bundled venv under LIBEXEC exists only for the unprivileged
+# vision worker (numpy / mediapipe) -- it deliberately has no PyGObject.
+# The GUI therefore runs on the system python, with the app directory on
+# PYTHONPATH so "python -m faceid_app.main" resolves the package.
+set -eu
+APP_DIR="/usr/share/faceid-nim/app"
+if [ ! -d "$APP_DIR/faceid_app" ]; then
+    APP_DIR="$(dirname "$0")/../faceid-nim"
+fi
+cd "$APP_DIR"
+export PYTHONPATH="$APP_DIR"
+exec /usr/bin/python3 -m faceid_app.main "$@"

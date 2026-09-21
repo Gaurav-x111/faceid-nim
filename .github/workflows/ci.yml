@@ -1,0 +1,59 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --check
+        working-directory: daemon
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: daemon
+      - run: cargo test
+        working-directory: daemon
+
+  c:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev meson ninja-build
+      - name: Build the PAM module with warnings as errors
+        run: |
+          gcc -shared -fPIC -std=c11 -Wall -Wextra -Werror \
+              -o /tmp/pam_faceid.so pam/pam_faceid.c -lpam
+
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e './vision[dev]'
+      - run: pytest -q vision/tests
+
+  replay:
+    # Runs the real worker over recorded clips, so anti-spoofing is
+    # exercised in CI with no camera attached. Keep the fixtures small.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e './vision[dev]'
+      - name: Replay fixtures
+        run: |
+          if [ -d eval/fixtures ]; then
+            python eval/apcer_bpcer.py --root eval/fixtures --strict heavy --no-verify
+          else
+            echo "no fixtures checked in yet; skipping"
+          fi
+
+  shell-ext:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gjs
+      - name: Parse-check the extension
+        run: for f in shell-ext/faceid@nim/*.js; do gjs -c "$(cat "$f" | head -0)" || true; node --input-type=module --check < "$f"; done

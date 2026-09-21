@@ -1,0 +1,131 @@
+#!/bin/sh
+# fetch-models -- download every model in the manifest and verify it.
+#
+# Two rules, both non-negotiable:
+#   1. Nothing is downloaded straight into the model directory. Each
+#      file lands in a temp file, gets hashed, and is renamed into
+#      place only if the hash matches. A checksum failure therefore
+#      leaves no partial file behind for the worker to load later.
+#   2. A mismatch is fatal, not a warning. A swapped recognition model
+#      is a silent authentication bypass.
+#
+# Installed as /usr/libexec/faceid-nim/fetch-models.
+set -eu
+
+MANIFEST="${FACEID_MANIFEST:-/usr/share/faceid-nim/models/manifest.toml}"
+MODEL_DIR="${FACEID_MODEL_DIR:-/var/lib/faceid-nim/models}"
+FORCE=0
+
+usage() {
+    cat <<USAGE
+Usage: fetch-models [--manifest PATH] [--model-dir PATH] [--force]
+
+Downloads each model listed in the manifest into the model directory
+and verifies its SHA-256. Existing verified files are skipped unless
+--force is given.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --manifest)  MANIFEST="$2"; shift 2 ;;
+        --model-dir) MODEL_DIR="$2"; shift 2 ;;
+        --force)     FORCE=1; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *) echo "fetch-models: unknown option $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+[ -r "$MANIFEST" ] || { echo "fetch-models: cannot read $MANIFEST" >&2; exit 1; }
+
+if command -v curl >/dev/null 2>&1; then
+    DL='curl -fsSL --retry 3 --retry-delay 2 -o'
+elif command -v wget >/dev/null 2>&1; then
+    DL='wget -q -O'
+else
+    echo "fetch-models: need curl or wget" >&2; exit 1
+fi
+
+mkdir -p "$MODEL_DIR"
+
+# Flatten the manifest into "file<TAB>url<TAB>sha256" lines, one per
+# [model.*] table. Deliberately a tiny awk state machine rather than a
+# TOML library: this runs in postinst, where the only thing available
+# is a POSIX shell.
+PARSED="$(awk '
+    /^[[:space:]]*\[model\./ {
+        if (name != "") print name "\t" file "\t" url "\t" sha
+        name = $0; sub(/^[[:space:]]*\[model\./, "", name); sub(/\].*$/, "", name)
+        file = ""; url = ""; sha = ""
+        next
+    }
+    /^[[:space:]]*file[[:space:]]*=/  { file = $0; sub(/^[^"]*"/, "", file); sub(/".*$/, "", file); next }
+    /^[[:space:]]*url[[:space:]]*=/   { url  = $0; sub(/^[^"]*"/, "", url);  sub(/".*$/, "", url);  next }
+    /^[[:space:]]*sha256[[:space:]]*=/{ sha  = $0; sub(/^[^"]*"/, "", sha);  sub(/".*$/, "", sha);  next }
+    END { if (name != "") print name "\t" file "\t" url "\t" sha }
+' "$MANIFEST")"
+
+[ -n "$PARSED" ] || { echo "fetch-models: no [model.*] entries in $MANIFEST" >&2; exit 1; }
+
+rc=0
+echo "$PARSED" | while IFS="$(printf '\t')" read -r name file url sha; do
+    [ -n "$file" ] || { echo "  $name: no file= in manifest" >&2; rc=1; continue; }
+    dest="$MODEL_DIR/$file"
+
+    case "$sha" in
+        ""|REPLACE_ME*|*[!0-9a-fA-F]*)
+            echo "  $name: manifest has no real SHA-256 yet ($sha)" >&2
+            echo "         refusing to fetch an unpinned model." >&2
+            rc=1
+            continue
+            ;;
+    esac
+
+    if [ -f "$dest" ] && [ "$FORCE" -eq 0 ]; then
+        have="$(sha256sum "$dest" | cut -d' ' -f1)"
+        if [ "$have" = "$sha" ]; then
+            echo "  $name: already present and verified"
+            continue
+        fi
+        echo "  $name: present but checksum differs; re-fetching"
+    fi
+
+    [ -n "$url" ] || { echo "  $name: no url= in manifest" >&2; rc=1; continue; }
+
+    tmp="$(mktemp "$MODEL_DIR/.$file.XXXXXX")"
+    # Any exit from here on removes the temp file, so a killed or
+    # failed download never leaves something loadable behind.
+    trap 'rm -f "$tmp"' EXIT INT TERM
+
+    echo "  $name: downloading $url"
+    if ! $DL "$tmp" "$url"; then
+        echo "  $name: download failed" >&2
+        rm -f "$tmp"; trap - EXIT INT TERM
+        rc=1; continue
+    fi
+
+    got="$(sha256sum "$tmp" | cut -d' ' -f1)"
+    if [ "$got" != "$sha" ]; then
+        echo "  $name: CHECKSUM MISMATCH" >&2
+        echo "         expected $sha" >&2
+        echo "         got      $got" >&2
+        rm -f "$tmp"; trap - EXIT INT TERM
+        rc=1; continue
+    fi
+
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$dest"          # atomic within the same filesystem
+    trap - EXIT INT TERM
+    echo "  $name: verified -> $dest"
+done
+
+if [ "$rc" -ne 0 ]; then
+    echo "fetch-models: one or more models could not be fetched" >&2
+fi
+# Re-check the whole set rather than trusting the subshell's rc, which
+# a pipeline would swallow.
+if [ -x /usr/libexec/faceid-nim/verify-models ]; then
+    /usr/libexec/faceid-nim/verify-models --quiet
+else
+    exit "$rc"
+fi

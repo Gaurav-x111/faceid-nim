@@ -1,0 +1,72 @@
+#!/bin/sh
+# verify-models -- exit 0 only if every manifest entry is present and
+# its SHA-256 matches.
+#
+# Called from postinst and from `faceid-nim verify`. The daemon and
+# worker do their own verification at load time; this is the
+# install-time and user-facing check.
+set -eu
+
+MANIFEST="${FACEID_MANIFEST:-/usr/share/faceid-nim/models/manifest.toml}"
+MODEL_DIR="${FACEID_MODEL_DIR:-/var/lib/faceid-nim/models}"
+QUIET=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --manifest)  MANIFEST="$2"; shift 2 ;;
+        --model-dir) MODEL_DIR="$2"; shift 2 ;;
+        --quiet|-q)  QUIET=1; shift ;;
+        -h|--help)
+            echo "Usage: verify-models [--manifest PATH] [--model-dir PATH] [--quiet]"
+            exit 0 ;;
+        *) echo "verify-models: unknown option $1" >&2; exit 2 ;;
+    esac
+done
+
+say() { [ "$QUIET" -eq 1 ] || echo "$@"; }
+
+[ -r "$MANIFEST" ] || { echo "verify-models: cannot read $MANIFEST" >&2; exit 1; }
+
+PARSED="$(awk '
+    /^[[:space:]]*\[model\./ {
+        if (name != "") print name "\t" file "\t" sha
+        name = $0; sub(/^[[:space:]]*\[model\./, "", name); sub(/\].*$/, "", name)
+        file = ""; sha = ""
+        next
+    }
+    /^[[:space:]]*file[[:space:]]*=/  { file = $0; sub(/^[^"]*"/, "", file); sub(/".*$/, "", file); next }
+    /^[[:space:]]*sha256[[:space:]]*=/{ sha  = $0; sub(/^[^"]*"/, "", sha);  sub(/".*$/, "", sha);  next }
+    END { if (name != "") print name "\t" file "\t" sha }
+' "$MANIFEST")"
+
+[ -n "$PARSED" ] || { echo "verify-models: no [model.*] entries" >&2; exit 1; }
+
+fail=0
+printf '%s\n' "$PARSED" > /tmp/.faceid-verify.$$
+trap 'rm -f /tmp/.faceid-verify.$$' EXIT INT TERM
+
+while IFS="$(printf '\t')" read -r name file sha; do
+    dest="$MODEL_DIR/$file"
+    case "$sha" in
+        ""|REPLACE_ME*|*[!0-9a-fA-F]*)
+            say "  $name: UNPINNED (manifest sha256 is a placeholder)"
+            fail=1; continue ;;
+    esac
+    if [ ! -f "$dest" ]; then
+        say "  $name: MISSING ($dest)"
+        fail=1; continue
+    fi
+    got="$(sha256sum "$dest" | cut -d' ' -f1)"
+    if [ "$got" != "$sha" ]; then
+        say "  $name: CHECKSUM MISMATCH"
+        fail=1; continue
+    fi
+    say "  $name: ok"
+done < /tmp/.faceid-verify.$$
+
+if [ "$fail" -ne 0 ]; then
+    say "verify-models: some models are missing or unverified"
+    exit 1
+fi
+say "verify-models: all models present and verified"
+exit 0

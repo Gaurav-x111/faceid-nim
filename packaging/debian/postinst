@@ -1,0 +1,130 @@
+#!/bin/sh
+# postinst -- create the worker user, lay out the data directories,
+# register the PAM profile (still disabled), check the models, start
+# the services.
+#
+# The one thing this script must never do is enable face unlock.
+# Installing a package should not change how a machine authenticates;
+# the user opts in from the Face Unlock app, behind a polkit prompt.
+set -e
+
+MODEL_DIR=/var/lib/faceid-nim/models
+LIBEXEC=/usr/libexec/faceid-nim
+
+case "$1" in
+  configure)
+    # --- system user -------------------------------------------------
+    if ! getent passwd faceid >/dev/null; then
+      adduser --system --group --no-create-home \
+              --home /var/lib/faceid-nim \
+              --shell /usr/sbin/nologin faceid
+    fi
+    # The worker needs the camera and nothing else.
+    adduser faceid video >/dev/null 2>&1 || true
+
+    # --- directories -------------------------------------------------
+    # The state root is 0711 (traverse-only): models are world-readable
+    # public model files that the unprivileged worker must reach, while
+    # the master key and templates stay behind 0600/0700 on their own
+    # leaves and the root itself can never be listed.
+    install -d -o root -g root -m 0711 /var/lib/faceid-nim
+    install -d -o root -g root -m 0755 "$MODEL_DIR"
+    install -d -o root -g root -m 0700 /var/log/faceid-nim
+    install -d -o root -g root -m 0755 /etc/faceid-nim
+
+    # --- default config ----------------------------------------------
+    if [ ! -f /etc/faceid-nim/config.toml ]; then
+      cat > /etc/faceid-nim/config.toml <<'CFG'
+# faceid-nim configuration.
+#
+# Face unlock is OFF until you turn it on in the Face Unlock app.
+enabled = false
+
+# off | light | heavy
+#   light: spoof cues veto an unlock
+#   heavy: additionally requires positive evidence of a real 3D face
+strictness = "light"
+
+# rgb | ir | both
+mode = "rgb"
+
+# There is no correct universal threshold. Measure yours with
+# eval/far_frr.py and replace this before trusting an unlock.
+tau = 0.40
+vote_k = 3
+vote_n = 5
+
+# Keep this short: PAM's auth conversation is sequential, so the
+# password box is usually unusable until the face attempt finishes.
+scan_timeout_ms = 4000
+max_failures = 5
+lockout_secs = 60
+require_attention = true
+
+camera = "/dev/video0"
+
+# The worker binds inside its own runtime subdirectory, which is the
+# only place it is allowed to write.
+worker_socket = "/run/faceid-nim/worker/vision.sock"
+auth_socket = "/run/faceid-nim/auth.sock"
+CFG
+      chmod 0644 /etc/faceid-nim/config.toml
+    fi
+
+    # --- models ------------------------------------------------------
+    # Model files are not shipped in the .deb: their licenses differ
+    # from the code's, and some are non-commercial research use only.
+    if [ -x "$LIBEXEC/verify-models" ]; then
+      if ! "$LIBEXEC/verify-models" --quiet; then
+        echo "faceid-nim: face recognition models are missing or unverified."
+        echo "            Run:  sudo faceid-nim fetch-models"
+        echo "            Until then the vision worker will refuse to start,"
+        echo "            and face unlock simply will not be offered."
+      fi
+    fi
+
+    # --- source-install fallback -------------------------------------
+    # `make install` puts the same files in the same places but does not
+    # run this script, so tolerate a layout that is already correct.
+    if [ ! -x "$LIBEXEC/faceid-nimd" ]; then
+      echo "faceid-nim: warning, $LIBEXEC/faceid-nimd not found."
+      echo "            If you installed from source, run 'sudo make install'."
+    fi
+
+    # --- GTK app plumbing --------------------------------------------
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+      glib-compile-schemas /usr/share/glib-2.0/schemas || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+      gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      update-desktop-database -q /usr/share/applications || true
+    fi
+
+    # --- PAM ----------------------------------------------------------
+    # Registers the profile as *available*. Default: no keeps it out of
+    # the stack until the app enables it.
+    pam-auth-update --package
+
+    # --- services -----------------------------------------------------
+    systemctl daemon-reload || true
+    systemctl enable --now faceid-nimd.service || true
+    systemctl enable --now faceid-vision.service || true
+
+    cat <<'MSG'
+
+faceid-nim installed. Face unlock is DISABLED.
+
+  1. sudo faceid-nim fetch-models     (downloads and verifies the models)
+  2. Open "Face Unlock", enroll, then enable it there.
+  3. On Wayland, log out and back in once so GNOME loads the extension.
+
+Check state any time with:  faceid-nim status
+Your password always works.
+MSG
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

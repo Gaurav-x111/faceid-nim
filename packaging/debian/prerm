@@ -1,0 +1,16 @@
+#!/bin/sh
+# prerm -- take the PAM profile out of the stack BEFORE any file is
+# removed. Removing pam_faceid.so while it is still referenced in
+# /etc/pam.d is how a package locks someone out of their own machine.
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    pam-auth-update --package --remove faceid-nim || true
+    systemctl disable --now faceid-vision.service || true
+    systemctl disable --now faceid-nimd.service || true
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

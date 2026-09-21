@@ -1,0 +1,20 @@
+enabled = true
+strictness = "light"
+tau = 0.40
+vote_k = 3
+vote_n = 5
+scan_timeout_ms = 8000
+max_failures = 5
+lockout_secs = 60
+# Hybrid: recognition embeds run on the RGB camera, spoof liveness on
+# the IR camera. rgb_device/ir_device are accepted aliases for the
+# canonical camera/ir_camera keys, so older configs keep working.
+mode = "hybrid"
+rgb_device = "/dev/video1"
+ir_device = "/dev/video3"
+require_attention = false
+allowed_services = ["gdm-password", "sudo", "polkit-1", "login", "gnome-screensaver"]
+data_dir = "/var/lib/faceid-nim"
+worker_socket = "/run/faceid-nim/worker/vision.sock"
+auth_socket = "/run/faceid-nim/auth.sock"
+audit_log = "/var/log/faceid-nim/audit.log"

@@ -1,0 +1,49 @@
+[Unit]
+Description=faceid-nim vision worker (unprivileged)
+# Ordered after the daemon because the daemon's ExecStartPre is what
+# creates /run/faceid-nim/worker with the right ownership.
+After=faceid-nimd.service
+Requires=faceid-nimd.service
+PartOf=faceid-nimd.service
+
+[Service]
+Type=simple
+User=faceid
+Group=faceid
+SupplementaryGroups=video
+ExecStart=/usr/libexec/faceid-nim/venv/bin/python3 -m faceid_vision \
+          --socket /run/faceid-nim/worker/vision.sock \
+          --device /dev/video1 \
+          --ir-device /dev/video3 \
+          --model-dir /var/lib/faceid-nim/models \
+          --manifest /usr/share/faceid-nim/models/manifest.toml
+Restart=always
+RestartSec=2s
+
+# This process holds the camera and runs ML code. It never sees a
+# template and never decides anything, so it is locked down hard.
+ProtectSystem=strict
+# Only its own subdirectory, not /run/faceid-nim itself: it must be
+# able to create and replace vision.sock, and nothing else.
+ReadWritePaths=/run/faceid-nim/worker
+ReadOnlyPaths=/var/lib/faceid-nim/models /usr/share/faceid-nim/models
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

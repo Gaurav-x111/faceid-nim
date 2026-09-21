@@ -1,0 +1,142 @@
+#!/bin/sh
+# faceid-nim -- command-line front end.
+#
+# POSIX sh, no bashisms: this has to work from postinst, from a
+# recovery console, and from a login shell that may not be bash.
+#
+# It deliberately cannot enable face unlock. Turning it on is a polkit
+# -gated action in the app, because enabling it from a script is how a
+# package ends up changing how a machine authenticates without anyone
+# deciding to.
+set -eu
+
+LIBEXEC=/usr/libexec/faceid-nim
+CONFIG=/etc/faceid-nim/config.toml
+
+usage() {
+    cat <<'USAGE'
+Usage: faceid-nim <command>
+
+  fetch-models      Download and verify the models listed in the manifest
+  verify            Check that every model is present and checksum-verified
+  status            Show daemon, worker, model and config state
+  restart           Restart both services (requires root)
+  diagnose          Full diagnostic report (requires root for some checks)
+
+Face unlock is enabled in the Face Unlock app, not here.
+Your password always works; see /usr/share/doc/faceid-nim/README.md.
+USAGE
+}
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || {
+        echo "faceid-nim: '$1' needs root (try: sudo faceid-nim $1)" >&2
+        exit 1
+    }
+}
+
+unit_state() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "unknown (no systemctl)"
+        return
+    fi
+    active="$(systemctl is-active "$1" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$1" 2>/dev/null || true)"
+    echo "${active:-unknown} (${enabled:-unknown})"
+}
+
+config_flag() {
+    # Reads a single top-level boolean/scalar out of the config without
+    # pulling in a TOML parser.
+    [ -r "$CONFIG" ] || { echo "?"; return; }
+    awk -v key="$1" '
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            gsub(/[";]/, "")
+            sub(/[[:space:]]*#.*$/, "")
+            print; exit
+        }' "$CONFIG"
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+    fetch-models)
+        need_root fetch-models
+        [ -x "$LIBEXEC/fetch-models" ] || {
+            echo "faceid-nim: $LIBEXEC/fetch-models not installed" >&2; exit 1; }
+        exec "$LIBEXEC/fetch-models" "$@"
+        ;;
+
+    verify)
+        [ -x "$LIBEXEC/verify-models" ] || {
+            echo "faceid-nim: $LIBEXEC/verify-models not installed" >&2; exit 1; }
+        exec "$LIBEXEC/verify-models" "$@"
+        ;;
+
+    status)
+        echo "Services"
+        echo "  faceid-nimd    : $(unit_state faceid-nimd.service)"
+        echo "  faceid-vision  : $(unit_state faceid-vision.service)"
+        echo
+        echo "Sockets"
+        for s in /run/faceid-nim/auth.sock /run/faceid-nim/worker/vision.sock; do
+            if [ -S "$s" ]; then
+                echo "  $s : present"
+            else
+                echo "  $s : MISSING"
+            fi
+        done
+        echo
+        echo "Models"
+        if [ -x "$LIBEXEC/verify-models" ]; then
+            "$LIBEXEC/verify-models" || true
+        else
+            echo "  verify-models not installed"
+        fi
+        echo
+        echo "Config ($CONFIG)"
+        if [ -r "$CONFIG" ]; then
+            echo "  enabled        : $(config_flag enabled)"
+            echo "  strictness     : $(config_flag strictness)"
+            echo "  mode           : $(config_flag mode)"
+            echo "  tau            : $(config_flag tau)"
+        else
+            echo "  not readable (run as root to see it)"
+        fi
+        echo
+        echo "PAM profile"
+        if grep -rqs pam_faceid.so /etc/pam.d/ 2>/dev/null; then
+            echo "  active in /etc/pam.d"
+        else
+            echo "  not active (face unlock is off)"
+        fi
+        ;;
+
+    diagnose)
+        need_root diagnose
+        if [ -x "$LIBEXEC/diagnose" ]; then
+            exec "$LIBEXEC/diagnose" "$@"
+        else
+            echo "faceid-nim: $LIBEXEC/diagnose not installed" >&2; exit 1
+        fi
+        ;;
+
+    restart)
+        need_root restart
+        systemctl restart faceid-nimd.service
+        systemctl restart faceid-vision.service
+        echo "restarted"
+        ;;
+
+    ""|-h|--help|help)
+        usage
+        ;;
+
+    *)
+        echo "faceid-nim: unknown command '$cmd'" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

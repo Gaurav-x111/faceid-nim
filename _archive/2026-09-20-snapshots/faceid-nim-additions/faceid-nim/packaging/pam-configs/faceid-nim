@@ -1,0 +1,8 @@
+Name: Face unlock (faceid-nim)
+Default: no
+Priority: 512
+Auth-Type: Primary
+Auth:
+	[success=end default=ignore]	pam_faceid.so quiet timeout=4500
+Auth-Initial:
+	[success=end default=ignore]	pam_faceid.so quiet timeout=4500

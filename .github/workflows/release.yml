@@ -1,0 +1,33 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  deb:
+    # Built on 24.04 so the binaries run on 24.04 and newer.
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y
+              libpam0g-dev meson ninja-build python3-venv devscripts debhelper
+      - run: make deb
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.deb > SHA256SUMS
+          cat SHA256SUMS
+      - name: Sign checksums
+        if: ${{ env.GPG_PRIVATE_KEY != '' }}
+        env: { GPG_PRIVATE_KEY: "${{ secrets.GPG_PRIVATE_KEY }}" }
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --detach-sign --armor -o dist/SHA256SUMS.asc dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true          # stays true until M6 passes on a clean VM
+          files: |
+            dist/*.deb
+            dist/SHA256SUMS
+            dist/SHA256SUMS.asc

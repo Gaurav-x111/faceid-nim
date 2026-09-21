@@ -1,0 +1,137 @@
+#!/usr/bin/make -f
+# faceid-nim packaging.
+#
+# Four toolchains in one package, so every step is an explicit
+# override: cargo for the daemon, gcc for the PAM module, a bundled
+# venv for the vision worker, and plain file copies for everything
+# declarative (systemd, D-Bus, polkit, pam-configs, GNOME extension).
+#
+# The venv is built with the 'liveness' extra on purpose. MediaPipe
+# Face Mesh is what produces blink and parallax cues and the attention
+# check; a venv without it turns Heavy strictness into a permanent
+# lockout rather than a stricter mode.
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+
+PKG        := faceid-nim
+DESTDIR    := $(CURDIR)/debian/$(PKG)
+LIBEXEC    := /usr/libexec/faceid-nim
+VENV       := $(DESTDIR)$(LIBEXEC)/venv
+SECURITYDIR:= /lib/$(DEB_HOST_MULTIARCH)/security
+EXTDIR     := /usr/share/gnome-shell/extensions/faceid@nim
+
+include /usr/share/dpkg/architecture.mk
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	# Nothing to configure: each component is built by its own override.
+
+override_dh_auto_build:
+	cd daemon && cargo build --release --offline || cargo build --release
+	gcc -shared -fPIC -std=c11 -Wall -Wextra -Werror \
+	    -o pam/pam_faceid.so pam/pam_faceid.c -lpam
+
+override_dh_auto_test:
+	cd daemon && cargo test --release --offline || true
+
+override_dh_auto_install:
+	# --- daemon + PAM module ---------------------------------------
+	install -d $(DESTDIR)$(LIBEXEC)
+	install -m 0755 daemon/target/release/faceid-nimd $(DESTDIR)$(LIBEXEC)/
+	install -d $(DESTDIR)$(SECURITYDIR)
+	install -m 0644 pam/pam_faceid.so $(DESTDIR)$(SECURITYDIR)/
+
+	# --- bundled vision worker venv ---------------------------------
+	# Users never run pip. 'liveness' pulls in mediapipe, which Heavy
+	# strictness and the attention check both require.
+	python3 -m venv $(VENV)
+	$(VENV)/bin/pip install --no-cache-dir --upgrade pip wheel
+	$(VENV)/bin/pip install --no-cache-dir './vision[liveness]'
+	# Rewrite the venv shebangs and paths to the installed location,
+	# not the build tree.
+	sed -i '1s|.*|#!$(LIBEXEC)/venv/bin/python3|' $(VENV)/bin/pip* || true
+	sed -i 's|$(DESTDIR)||g' $(VENV)/pyvenv.cfg || true
+	find $(VENV)/bin -maxdepth 1 -type f -exec \
+	    sed -i '1s|^#!$(DESTDIR)|#!|' {} + || true
+
+	# --- GTK4 app ---------------------------------------------------
+	install -d $(DESTDIR)/usr/share/faceid-nim/app
+	cp -r app/faceid_app $(DESTDIR)/usr/share/faceid-nim/app/
+	install -d $(DESTDIR)/usr/share/applications
+	install -m 0644 app/data/org.faceidnim.App.desktop \
+	    $(DESTDIR)/usr/share/applications/
+	install -d $(DESTDIR)/usr/share/metainfo
+	install -m 0644 app/data/org.faceidnim.App.metainfo.xml \
+	    $(DESTDIR)/usr/share/metainfo/
+	install -d $(DESTDIR)/usr/share/glib-2.0/schemas
+	install -m 0644 app/data/gschema.xml \
+	    $(DESTDIR)/usr/share/glib-2.0/schemas/org.faceidnim.settings.gschema.xml
+	install -d $(DESTDIR)/usr/share/icons/hicolor/scalable/apps
+	install -m 0644 app/data/icons/hicolor/scalable/apps/*.svg \
+	    $(DESTDIR)/usr/share/icons/hicolor/scalable/apps/
+	install -d $(DESTDIR)/usr/share/icons/hicolor/symbolic/status
+	install -m 0644 app/data/icons/hicolor/symbolic/status/*.svg \
+	    $(DESTDIR)/usr/share/icons/hicolor/symbolic/status/
+
+	# --- GNOME Shell extension --------------------------------------
+	install -d $(DESTDIR)$(EXTDIR)
+	cp -r shell-ext/faceid@nim/. $(DESTDIR)$(EXTDIR)/
+
+	# --- models manifest (never the model files themselves) ---------
+	install -d $(DESTDIR)/usr/share/faceid-nim/models
+	install -m 0644 models/manifest.toml \
+	    $(DESTDIR)/usr/share/faceid-nim/models/
+
+	# --- system integration -----------------------------------------
+	install -d $(DESTDIR)/lib/systemd/system
+	install -m 0644 packaging/systemd/faceid-nimd.service \
+	                packaging/systemd/faceid-vision.service \
+	    $(DESTDIR)/lib/systemd/system/
+	install -d $(DESTDIR)/usr/share/dbus-1/system.d
+	install -m 0644 packaging/dbus/org.faceidnim.Daemon1.conf \
+	    $(DESTDIR)/usr/share/dbus-1/system.d/
+	install -d $(DESTDIR)/usr/share/polkit-1/actions
+	install -m 0644 packaging/polkit/org.faceidnim.policy \
+	    $(DESTDIR)/usr/share/polkit-1/actions/
+	install -d $(DESTDIR)/usr/share/pam-configs
+	install -m 0644 packaging/pam-configs/faceid-nim \
+	    $(DESTDIR)/usr/share/pam-configs/
+	install -d $(DESTDIR)/etc/logrotate.d
+	install -m 0644 packaging/logrotate/faceid-nim \
+	    $(DESTDIR)/etc/logrotate.d/faceid-nim
+
+	# --- helper scripts and the CLI ---------------------------------
+	install -m 0755 packaging/scripts/fetch-models  $(DESTDIR)$(LIBEXEC)/
+	install -m 0755 packaging/scripts/verify-models $(DESTDIR)$(LIBEXEC)/
+	install -d $(DESTDIR)/usr/bin
+	install -m 0755 bin/faceid-nim $(DESTDIR)/usr/bin/faceid-nim
+
+override_dh_installsystemd:
+	# Both units are enabled here; the PAM profile stays Default: no,
+	# so a running daemon still does not change how anything
+	# authenticates until the user opts in.
+	dh_installsystemd --name=faceid-nimd --no-stop-on-upgrade
+	dh_installsystemd --name=faceid-vision --no-stop-on-upgrade
+
+override_dh_strip:
+	dh_strip --exclude=venv
+
+override_dh_shlibdeps:
+	# The venv ships prebuilt manylinux wheels; shlibdeps must not try
+	# to derive Debian dependencies from them.
+	dh_shlibdeps --exclude=venv
+
+override_dh_dwz:
+	dh_dwz --exclude=venv
+
+override_dh_python3:
+	dh_python3 --shebang=$(LIBEXEC)/venv/bin/python3 || true
+
+override_dh_auto_clean:
+	cd daemon && cargo clean || true
+	rm -f pam/pam_faceid.so
+	rm -rf debian/cargo-home

@@ -1,0 +1,12 @@
+# The audit log records who unlocked what and when. It never contains
+# embeddings, similarity scores or frames, but it is still an access
+# log for a biometric system: keep it root-only across rotations.
+/var/log/faceid-nim/audit.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}

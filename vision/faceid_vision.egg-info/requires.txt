@@ -1,0 +1,10 @@
+numpy>=1.24
+opencv-python-headless>=4.9
+onnxruntime>=1.17
+
+[dev]
+pytest>=8
+pytest-cov
+
+[liveness]
+mediapipe<1.0,>=0.10

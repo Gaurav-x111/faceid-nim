@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faceid-vision"
+version = "0.1.0"
+description = "Vision worker for faceid-nim"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "opencv-python-headless>=4.9",
+  "onnxruntime>=1.17",
+]
+
+[project.optional-dependencies]
+# Dense landmarks. Optional: without it, blink and parallax report
+# "unknown" and recognition is unaffected.
+#
+# mediapipe is pinned <1.0 deliberately: the 1.x series dropped the
+# `mp.solutions.face_mesh` API that lib/faceid_vision/landmarks.py uses
+# (FaceMesh() fails -- silently for us, it stands in as mesh.available
+# being False -- under mediapipe>=1.0). Upgrade to 1.x only together
+# with a migration of the FaceMesh wrapper to the Tasks API.
+liveness = ["mediapipe>=0.10,<1.0"]
+dev = ["pytest>=8", "pytest-cov"]
+
+[project.scripts]
+faceid-vision = "faceid_vision.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["faceid_vision*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

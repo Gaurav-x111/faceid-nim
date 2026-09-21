@@ -1,0 +1,25 @@
+Source: faceid-nim
+Section: admin
+Priority: optional
+Maintainer: Gaurav <gaurav@example.invalid>
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.75), libpam0g-dev,
+ meson, ninja-build, python3-all, python3-venv
+Standards-Version: 4.6.2
+Homepage: https://github.com/Gaurav-x111/faceid-nim
+
+Package: faceid-nim
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, libpam-runtime, python3 (>= 3.10),
+ policykit-1 | polkitd, dbus, adduser
+Recommends: gnome-shell (>= 45)
+Suggests: linux-enable-ir-emitter
+Description: Face unlock for Ubuntu with a lock-screen animation
+ Face unlock via PAM, backed by a privileged daemon and an unprivileged
+ vision worker, with a GNOME Shell pill showing scan state.
+ .
+ This is a convenience feature, not Face ID. On an ordinary RGB webcam
+ it can be defeated by a good video replay; an infrared camera is
+ substantially stronger. Your password always continues to work.
+ .
+ Face unlock is installed disabled and stays off until you enable it in
+ the Face Unlock app.

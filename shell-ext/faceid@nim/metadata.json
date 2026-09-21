@@ -1,0 +1,9 @@
+{
+  "uuid": "faceid@nim",
+  "name": "faceid@nim",
+  "description": "Dynamic-Island-style pill showing face-unlock scan state on the lock screen.",
+  "shell-version": ["45", "46", "47", "48"],
+  "session-modes": ["user", "unlock-dialog", "gdm"],
+  "url": "https://github.com/Gaurav-x111/faceid-nim",
+  "version": 1
+}

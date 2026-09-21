@@ -1,0 +1,66 @@
+/* faceid@nim lock-screen pill.
+ *
+ * Deliberately restrained: the glyph carries the motion, so the
+ * container only has to look like it belongs on a GNOME lock screen
+ * and get out of the way. Heavy gradients or a bright border would
+ * fight the Cairo animation for attention.
+ *
+ * GNOME's lock screen sits on the user's wallpaper, which can be any
+ * colour, so the pill uses a near-opaque dark surface rather than a
+ * light translucency that would be unreadable over a bright photo.
+ */
+
+.faceid-pill {
+    background-color: rgba(18, 20, 24, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 44px;
+    padding: 10px 22px 10px 12px;
+    spacing: 14px;
+    margin-bottom: 22px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+    /* Matches the expand/contract timing in pill.js so the CSS
+     * transition never fights the Clutter ease. */
+    transition-duration: 340ms;
+}
+
+/* Success and failure tint the surface rather than recolouring the
+ * whole pill: the glyph is already green or red, and doubling that up
+ * makes the lock screen look like an error dialog. */
+.faceid-pill-ok {
+    background-color: rgba(16, 38, 24, 0.90);
+    border-color: rgba(92, 219, 132, 0.28);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 4px rgba(92, 219, 132, 0.08);
+}
+
+.faceid-pill-fail {
+    background-color: rgba(44, 18, 18, 0.90);
+    border-color: rgba(255, 107, 107, 0.28);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 4px rgba(255, 107, 107, 0.08);
+}
+
+.faceid-glyph {
+    width: 60px;
+    height: 60px;
+}
+
+.faceid-textbox {
+    spacing: 1px;
+}
+
+.faceid-title {
+    color: rgba(255, 255, 255, 0.96);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.faceid-subtitle {
+    color: rgba(255, 255, 255, 0.58);
+    font-size: 12.5px;
+    font-weight: 400;
+}
+
+/* Hover-to-retry affordance, only meaningful in the failed state but
+ * harmless elsewhere. */
+.faceid-pill:hover {
+    background-color: rgba(26, 29, 34, 0.92);
+}

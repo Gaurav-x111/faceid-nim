@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  These keys mirror the daemon's Config field names so the app and
+  /etc/faceid-nim/config.toml never drift apart.
+
+  The daemon's config file remains authoritative: it is what actually
+  decides an unlock, and it is root-owned for exactly that reason.
+  These settings are the app's view of it, kept in sync through
+  GetSettings/SetSettings. Writing a key here does not by itself change
+  how the machine authenticates.
+-->
+<schemalist>
+
+  <enum id="org.faceidnim.settings.strictness">
+    <value nick="off"   value="0"/>
+    <value nick="light" value="1"/>
+    <value nick="heavy" value="2"/>
+  </enum>
+
+  <enum id="org.faceidnim.settings.mode">
+    <value nick="rgb"  value="0"/>
+    <value nick="ir"   value="1"/>
+    <value nick="both" value="2"/>
+  </enum>
+
+  <schema id="org.faceidnim.settings" path="/org/faceidnim/settings/">
+
+    <key name="enabled" type="b">
+      <default>false</default>
+      <summary>Face unlock enabled</summary>
+      <description>
+        Off by default. Installing the package must never change how the
+        machine authenticates; the user opts in explicitly.
+      </description>
+    </key>
+
+    <key name="strictness" enum="org.faceidnim.settings.strictness">
+      <default>'light'</default>
+      <summary>Anti-spoofing strictness</summary>
+      <description>
+        off: recognition only, not recommended. light: spoof cues veto an
+        unlock. heavy: additionally requires positive evidence of a real
+        3D face, such as a blink or head motion.
+      </description>
+    </key>
+
+    <key name="mode" enum="org.faceidnim.settings.mode">
+      <default>'rgb'</default>
+      <summary>Camera mode</summary>
+      <description>
+        Which camera streams to use. Infrared is substantially harder to
+        spoof, because screens emit almost no infrared.
+      </description>
+    </key>
+
+    <key name="tau" type="d">
+      <default>0.40</default>
+      <range min="0.0" max="1.0"/>
+      <summary>Recognition threshold</summary>
+      <description>
+        Cosine similarity a frame must reach to count as a match. There
+        is no correct universal value: measure yours with
+        eval/far_frr.py. The default is a placeholder with no evidence
+        behind it.
+      </description>
+    </key>
+
+    <key name="vote-k" type="i">
+      <default>3</default>
+      <range min="1" max="20"/>
+      <summary>Frames that must match</summary>
+      <description>
+        One lucky frame is not evidence. At least this many of the last
+        vote-n usable frames must clear the threshold.
+      </description>
+    </key>
+
+    <key name="vote-n" type="i">
+      <default>5</default>
+      <range min="1" max="20"/>
+      <summary>Voting window size</summary>
+    </key>
+
+    <key name="scan-timeout-ms" type="i">
+      <default>4000</default>
+      <range min="500" max="15000"/>
+      <summary>Scan timeout in milliseconds</summary>
+      <description>
+        Keep this short. PAM's authentication conversation is sequential,
+        so the password box is usually unusable until the face attempt
+        finishes.
+      </description>
+    </key>
+
+    <key name="require-attention" type="b">
+      <default>true</default>
+      <summary>Require eyes open and facing the camera</summary>
+      <description>
+        Stops the laptop being held up to a sleeping user. Needs
+        MediaPipe Face Mesh, which the bundled worker includes.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>
