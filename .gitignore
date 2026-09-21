@@ -7,3 +7,4 @@ __pycache__/
 eval/out/
 eval/data/
 .venv/
+.vscode/
