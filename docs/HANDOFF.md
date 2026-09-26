@@ -2,6 +2,19 @@
 
 Written so you can pick up without re-reading everything.
 
+## Open work: universal / zero-config setup
+
+A full audit of the tech stack and a step-by-step plan for making the
+`.deb` install-and-work on any Linux laptop with a camera — automatic
+model provisioning, GPU-or-CPU selection, camera/IR auto-detection,
+honest liveness reporting — is in **[UNIVERSAL-SETUP.md](UNIVERSAL-SETUP.md)**.
+
+Nothing in it is implemented yet. The highest-severity finding it records
+is that **MediaPipe Face Mesh and the MiniFASNet anti-spoof model do not
+actually run in the shipped build**, so blink, planarity,
+challenge-response and the attention check are silently inert. Fix that
+first; it is a correctness bug, not a polish item.
+
 ## Verified in this session
 
 - `vision/` — all modules compile; **15 unit tests pass** (`pytest -q vision/tests`).

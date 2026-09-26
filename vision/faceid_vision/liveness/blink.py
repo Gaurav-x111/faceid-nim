@@ -59,7 +59,7 @@ class BlinkDetector:
     def eyes_open(self) -> bool:
         """Attention check: stops 'held up to a sleeping user'."""
         if not self.history:
-            return False
+            return True  # unknown, not closed: never veto on zero observations
         tail = self.history[-5:]
         return float(np.mean(tail)) > self.open_thr
 

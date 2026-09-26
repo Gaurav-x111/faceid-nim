@@ -24,7 +24,11 @@ if [[ -f "$CONFIG_FILE" ]]; then
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%s)"
     echo "  Backed up existing config"
 fi
-cp /home/zang/name/faceid@nim/packaging/faceid-nim-config.toml "$CONFIG_FILE"
+# Resolve source files relative to this script, so setup works from a
+# checkout, a tarball, or anywhere -- never a hardcoded home directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGING_DIR="$(dirname "$SCRIPT_DIR")"
+cp "$PACKAGING_DIR/faceid-nim-config.toml" "$CONFIG_FILE"
 chmod 644 "$CONFIG_FILE"
 echo "  Installed $CONFIG_FILE"
 
@@ -34,7 +38,7 @@ if [[ -f "$PAM_PROFILE" ]]; then
     cp "$PAM_PROFILE" "${PAM_PROFILE}.bak.$(date +%s)"
     echo "  Backed up existing PAM profile"
 fi
-cp /home/zang/name/faceid@nim/packaging/pam-configs/faceid-nim "$PAM_PROFILE"
+cp "$PACKAGING_DIR/pam-configs/faceid-nim" "$PAM_PROFILE"
 echo "  Installed $PAM_PROFILE"
 
 # 3. Update PAM configuration using pam-auth-update

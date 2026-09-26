@@ -30,11 +30,16 @@
 //! So `StartEnrollment` returns a unix fd: the read end of a private
 //! pipe, handed to exactly one caller as the return value of their own
 //! method call. Nothing else on the bus can obtain it. Framing is a
-//! 4-byte big-endian length followed by that many JPEG bytes. The
+//! one-byte tag, then a 4-byte big-endian length, then that many bytes:
+//!   b'J' + u32be + jpeg          a frame
+//!   b'G' + u32be + "status|reason"  live pose guidance
+//! The tag is what lets the app tell a guidance line from a frame on one
+//! channel, with no second socket and no cross-process escaping. The
 //! daemon drops the write end on cancel, finish, or caller mismatch,
 //! so the app's reader sees a clean EOF. Frames are never written to
 //! disk and never logged.
 
+use crate::authz;
 use crate::config::Config;
 use crate::store::{Identity, Store};
 use crate::worker::{Progress, Worker};
@@ -43,7 +48,7 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use zbus::{interface, object_server::SignalContext, proxy, zvariant, Connection};
+use zbus::{interface, object_server::SignalContext, zvariant, Connection};
 
 /// The nine poses, in the order the app walks the user through them.
 pub const POSES: [&str; 9] = [
@@ -78,9 +83,52 @@ struct Session {
     /// Write end of the preview pipe. Dropped to close the channel.
     preview: Option<std::fs::File>,
     embeddings: Vec<Vec<f32>>,
+    /// Parallel to `embeddings`: SPECTRUM_RGB/IR/ANY per template.
+    spectra: Vec<u8>,
     model_id: String,
     pose_index: u32,
     cancelled: bool,
+}
+
+/// Tag for an enrollment scan: worker-reported spectrum wins; fallback
+/// assumes from the requested mode (auto without a report -> rgb).
+fn enroll_tag(reported: &str, requested_mode: &str) -> u8 {
+    let t = crate::store::spectrum_tag(reported);
+    if t != crate::store::SPECTRUM_ANY {
+        return t;
+    }
+    match requested_mode {
+        "ir" => crate::store::SPECTRUM_IR,
+        _ => crate::store::SPECTRUM_RGB,
+    }
+}
+
+/// Push embeddings with dedup *within* spectrum only: an IR face is not
+/// a duplicate of an RGB face even at high cosine.
+fn push_tagged(
+    embeddings: &mut Vec<Vec<f32>>,
+    spectra: &mut Vec<u8>,
+    fresh: &[Vec<f32>],
+    tag: u8,
+    max: usize,
+) {
+    for e in fresh {
+        if embeddings.len() >= max {
+            break;
+        }
+        let dup = embeddings.iter().enumerate().any(|(ix, t)| {
+            spectra
+                .get(ix)
+                .copied()
+                .unwrap_or(crate::store::SPECTRUM_ANY)
+                == tag
+                && crate::matcher::cosine_max(e, std::slice::from_ref(t)) > DUP_SIMILARITY
+        });
+        if !dup {
+            embeddings.push(e.clone());
+            spectra.push(tag);
+        }
+    }
 }
 
 impl Session {
@@ -95,9 +143,7 @@ impl Session {
             return;
         }
         if file.write_all(b"J").is_err()
-            || file
-                .write_all(&(jpeg.len() as u32).to_be_bytes())
-                .is_err()
+            || file.write_all(&(jpeg.len() as u32).to_be_bytes()).is_err()
             || file.write_all(jpeg).is_err()
         {
             // Reader went away, or the pipe filled. Drop it.
@@ -198,87 +244,6 @@ impl Enrollment1 {
     }
 }
 
-/// CheckAuthorization via org.freedesktop.PolicyKit1.Authority.
-///
-/// D-Bus uses a tagged struct for a PolicyKit subject: `(sa{sv})`.
-///
-/// It is tempting to send just the `a{sv}` properties map here, but that
-/// produces `(a{sv}sa{ss}us)`, while PolicyKit expects
-/// `((sa{sv})sa{ss}us)`.  In particular, the `"unix-user"` property is not
-/// enough on its own -- the `"unix-user"` *subject kind* is the first member
-/// of the struct.
-type PolkitSubject = (String, HashMap<String, zvariant::OwnedValue>);
-type AuthzResult = zbus::Result<(bool, bool, HashMap<String, String>)>;
-
-/// Fails closed: if polkitd is unreachable or answers "no", the method
-/// is denied. Enrollment must never succeed without a password re-auth.
-#[proxy(
-    interface = "org.freedesktop.PolicyKit1.Authority",
-    default_service = "org.freedesktop.PolicyKit1",
-    default_path = "/org/freedesktop/PolicyKit1/Authority"
-)]
-trait Authority {
-    fn check_authorization(
-        &self,
-        subject: &PolkitSubject,
-        action_id: &str,
-        details: &HashMap<String, String>,
-        flags: u32,
-        cancellation_id: &str,
-    ) -> AuthzResult;
-}
-
-async fn require_polkit(
-    conn: &Connection,
-    hdr: &zbus::message::Header<'_>,
-    action: &str,
-) -> zbus::fdo::Result<()> {
-    // Use the caller's system bus name as the subject. This lets polkitd
-    // resolve the calling process itself via the bus, avoiding the
-    // fragile PID/start-time lookup that a unix-process subject would need.
-    let sender = hdr
-        .sender()
-        .ok_or_else(|| zbus::fdo::Error::AccessDenied("no sender".into()))?;
-
-    let mut subject_properties: HashMap<String, zvariant::OwnedValue> = HashMap::new();
-    subject_properties.insert(
-        "name".into(),
-        zvariant::Value::from(sender.as_str()).try_into().unwrap(),
-    );
-    let subject = ("system-bus-name".to_string(), subject_properties);
-
-    eprintln!("[polkit] action_id={:?} subject=system-bus-name:{}", action, sender.as_str());
-
-    let authority = AuthorityProxy::new(conn)
-        .await
-        .map_err(|e| zbus::fdo::Error::Failed(format!("polkit: {e}")))?;
-    // flags 1 = POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION,
-    // so the auth agent is allowed to pop up a password prompt.
-    let result = authority
-        .check_authorization(&subject, action, &HashMap::new(), 1, "")
-        .await;
-
-    match &result {
-        Ok((authorized, challenge, details)) => {
-            eprintln!("[polkit] authorized={} challenge={:?} details={:?}", authorized, challenge, details);
-        }
-        Err(e) => {
-            eprintln!("[polkit] ERROR: {:?}", e);
-        }
-    }
-
-    let (authorized, _, _) = result
-        .map_err(|e| zbus::fdo::Error::Failed(format!("polkit: {e}")))?;
-
-    if authorized {
-        Ok(())
-    } else {
-        Err(zbus::fdo::Error::AccessDenied(
-            "not authorized to perform this action".into(),
-        ))
-    }
-}
-
 #[interface(name = "org.faceidnim.Enrollment1")]
 impl Enrollment1 {
     /// The pose prompts, in order. Returned rather than hardcoded in
@@ -340,6 +305,7 @@ impl Enrollment1 {
                 identity,
                 preview: Some(write_file),
                 embeddings: Vec::new(),
+                spectra: Vec::new(),
                 model_id: String::new(),
                 pose_index: 0,
                 cancelled: false,
@@ -442,6 +408,7 @@ impl Enrollment1 {
                 Some(pv_tx),
                 cfg.ir_camera.clone(),
                 Some(gd_tx),
+                Some(cfg.camera.clone()),
             )
             .await;
         pump.abort();
@@ -468,6 +435,64 @@ impl Enrollment1 {
             }
         };
 
+        // Dual-spectrum capture: after the primary scan, quietly scan the
+        // OTHER spectrum (no preview/guide/progress pumps) when that
+        // sensor exists, so one enrollment covers dark (IR) and lit (RGB).
+        let primary_tag = enroll_tag(&ev.spectrum, cfg.mode.as_str());
+        let other: Option<(&str, Option<String>, Option<String>)> =
+            if primary_tag == crate::store::SPECTRUM_IR {
+                // Primary was IR -> other is RGB on cfg.camera.
+                Some(("rgb", None, Some(cfg.camera.clone())))
+            } else if cfg.ir_camera.is_some() {
+                // Primary was RGB (or ANY fallback) -> other is IR.
+                Some(("ir", cfg.ir_camera.clone(), Some(cfg.camera.clone())))
+            } else {
+                None
+            };
+        let second = if let Some((other_mode, other_ir, other_dev)) = other {
+            // Skip the second scan when the session already holds plenty
+            // of that spectrum (~12 cap keeps total under MAX_TEMPLATES).
+            let have_other = self
+                .with_session(&session, uid, |s| {
+                    Ok(s.spectra
+                        .iter()
+                        .filter(|t| {
+                            **t == enroll_tag("", other_mode) || **t == crate::store::SPECTRUM_ANY
+                        })
+                        .count())
+                })
+                .await
+                .unwrap_or(MAX_TEMPLATES);
+            if have_other >= 12 {
+                None
+            } else {
+                match self
+                    .worker
+                    .scan(
+                        &format!("{session}-p{idx}-x"),
+                        other_mode,
+                        "off",
+                        cfg.scan_timeout_ms,
+                        false,
+                        None,
+                        None,
+                        other_ir,
+                        None,
+                        other_dev,
+                    )
+                    .await
+                {
+                    Ok(e2) => Some(e2),
+                    Err(e) => {
+                        tracing::debug!("enroll pose {idx} second spectrum failed: {e}");
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
         let (status, progress) = self
             .with_session(&session, uid, |s| {
                 if s.model_id.is_empty() {
@@ -480,18 +505,42 @@ impl Enrollment1 {
                         "recognition model changed mid-enrollment; start again".into(),
                     ));
                 }
-                for e in &ev.embeddings {
-                    if s.embeddings.len() >= MAX_TEMPLATES {
-                        break;
-                    }
-                    let dup = s.embeddings.iter().any(|t| {
-                        crate::matcher::cosine_max(e, std::slice::from_ref(t)) > DUP_SIMILARITY
-                    });
-                    if !dup {
-                        s.embeddings.push(e.clone());
+                push_tagged(
+                    &mut s.embeddings,
+                    &mut s.spectra,
+                    &ev.embeddings,
+                    primary_tag,
+                    MAX_TEMPLATES,
+                );
+                if let Some(e2) = &second {
+                    if !e2.model_id.is_empty() && e2.model_id != s.model_id {
+                        // Model changed between the two scans: keep the
+                        // primary only, never mix models.
+                    } else {
+                        let tag2 = enroll_tag(&e2.spectrum, "rgb");
+                        // Force the intended other-spectrum tag when the
+                        // worker report is empty/ambiguous.
+                        let want = if primary_tag == crate::store::SPECTRUM_IR {
+                            crate::store::SPECTRUM_RGB
+                        } else {
+                            crate::store::SPECTRUM_IR
+                        };
+                        let tag2 = if tag2 == crate::store::SPECTRUM_ANY {
+                            want
+                        } else {
+                            tag2
+                        };
+                        push_tagged(
+                            &mut s.embeddings,
+                            &mut s.spectra,
+                            &e2.embeddings,
+                            tag2,
+                            MAX_TEMPLATES,
+                        );
                     }
                 }
-                let got = !ev.embeddings.is_empty();
+                let got = !ev.embeddings.is_empty()
+                    || second.as_ref().is_some_and(|e2| !e2.embeddings.is_empty());
                 let p = (s.embeddings.len() as f64 / MAX_TEMPLATES as f64).min(1.0);
                 Ok(if got {
                     (ST_POSE_COMPLETE.to_string(), p)
@@ -513,6 +562,7 @@ impl Enrollment1 {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<u32> {
         let uid = self.caller_uid(&hdr).await?;
+        authz::require_polkit(&self.conn, &hdr, authz::ACTION_ENROLL).await?;
 
         let mut map = self.sessions.lock().await;
         let mut s = map
@@ -538,6 +588,7 @@ impl Enrollment1 {
                     model_id: s.model_id.clone(),
                     enabled: true,
                     templates: std::mem::take(&mut s.embeddings),
+                    spectra: std::mem::take(&mut s.spectra),
                 },
             )
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
@@ -564,6 +615,7 @@ impl Enrollment1 {
             s.cancelled = true;
             s.close_preview();
             s.embeddings.clear();
+            s.spectra.clear();
             let idx = s.pose_index;
             drop(map);
             let _ = Self::enroll_progress(&ctxt, &session, idx, "", ST_CANCELLED, 0.0).await;

@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,6 +39,18 @@ pub struct Config {
     pub worker_socket: PathBuf,
     pub auth_socket: PathBuf,
     pub audit_log: PathBuf,
+    /// Opt-in lock/unlock timeline (JSON, no sudo/polkit entries).
+    /// Off by default: nothing extra is written until the user ticks
+    /// the checkbox in the app.
+    #[serde(default)]
+    pub timeline_enabled: bool,
+    #[serde(default = "default_timeline_log")]
+    pub timeline_log: PathBuf,
+    /// Users never offered face unlock (e.g. ["guest"]). They fall
+    /// through to password immediately, before the camera opens.
+    /// Empty by default: no one is excluded.
+    #[serde(default)]
+    pub exclude_users: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +81,10 @@ pub enum CameraMode {
     /// on the colour camera, spoof cues on the infrared one. Behaviours
     /// as `both` (RGB-primary) at the worker.
     Hybrid,
+    /// Per-scan room-light decision in the worker: dark -> IR primary,
+    /// lit -> RGB primary. The worker reports the resolved spectrum in
+    /// `ev_done.spectrum` so voting can gate templates by spectrum.
+    Auto,
 }
 
 impl CameraMode {
@@ -75,8 +94,13 @@ impl CameraMode {
             Self::Ir => "ir",
             Self::Both => "both",
             Self::Hybrid => "hybrid",
+            Self::Auto => "auto",
         }
     }
+}
+
+fn default_timeline_log() -> PathBuf {
+    PathBuf::from("/var/log/faceid-nim/timeline.jsonl")
 }
 
 impl Default for Config {
@@ -107,9 +131,12 @@ impl Default for Config {
                 "gnome-screensaver".into(),
             ],
             data_dir: PathBuf::from("/var/lib/faceid-nim"),
-            worker_socket: PathBuf::from("/run/faceid-nim/vision.sock"),
+            worker_socket: PathBuf::from("/run/faceid-nim/worker/vision.sock"),
             auth_socket: PathBuf::from("/run/faceid-nim/auth.sock"),
             audit_log: PathBuf::from("/var/log/faceid-nim/audit.log"),
+            timeline_enabled: false,
+            timeline_log: default_timeline_log(),
+            exclude_users: Vec::new(),
         }
     }
 }
@@ -138,10 +165,19 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?; // atomic: never leave a half-written config
-        Ok(())
+        let tmp = path.with_extension(format!(
+            "toml.tmp.{}.{}",
+            std::process::id(),
+            SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| -> anyhow::Result<()> {
+            std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
+            Ok(std::fs::rename(&tmp, path)?)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     pub fn service_allowed(&self, service: &str) -> bool {
@@ -165,6 +201,8 @@ impl Config {
             self.vote_n = self.vote_k;
         }
         self.scan_timeout_ms = self.scan_timeout_ms.clamp(500, 15_000);
+        self.max_failures = self.max_failures.clamp(1, 20);
+        self.lockout_secs = self.lockout_secs.clamp(10, 3600);
     }
 }
 
@@ -202,7 +240,8 @@ mod tests {
         let c = parse(concat!(
             "mode = \"hybrid\"\n",
             "rgb_device = \"/dev/video1\"\n",
-            "ir_device = \"/dev/video3\"\n"));
+            "ir_device = \"/dev/video3\"\n"
+        ));
         assert_eq!(c.mode, CameraMode::Hybrid);
         assert_eq!(c.camera, "/dev/video1");
         assert_eq!(c.ir_camera.as_deref(), Some("/dev/video3"));
@@ -214,7 +253,8 @@ mod tests {
         // installed config never silently changes behaviour.
         let c = parse(concat!(
             "camera = \"/dev/video0\"\n",
-            "ir_camera = \"/dev/video2\"\n"));
+            "ir_camera = \"/dev/video2\"\n"
+        ));
         assert_eq!(c.camera, "/dev/video0");
         assert_eq!(c.ir_camera.as_deref(), Some("/dev/video2"));
         assert_eq!(c.mode, CameraMode::Rgb); // default unchanged
@@ -222,10 +262,12 @@ mod tests {
 
     #[test]
     fn save_roundtrips_hybrid() {
-        let mut c = Config::default();
-        c.mode = CameraMode::Hybrid;
-        c.camera = "/dev/video1".into();
-        c.ir_camera = Some("/dev/video3".into());
+        let c = Config {
+            mode: CameraMode::Hybrid,
+            camera: "/dev/video1".into(),
+            ir_camera: Some("/dev/video3".into()),
+            ..Config::default()
+        };
         let mut p = std::env::temp_dir();
         p.push(format!("faceid-cfg-save-{}.toml", std::process::id()));
         assert!(c.save(&p).is_ok());
@@ -234,5 +276,58 @@ mod tests {
         assert_eq!(back.mode, CameraMode::Hybrid);
         assert_eq!(back.camera, "/dev/video1");
         assert_eq!(back.ir_camera.as_deref(), Some("/dev/video3"));
+    }
+
+    #[test]
+    fn auto_mode_parses() {
+        let c = parse("mode = \"auto\"\n");
+        assert_eq!(c.mode, CameraMode::Auto);
+        assert_eq!(c.mode.as_str(), "auto");
+    }
+
+    /// The exact config postinst generates on a fresh install must parse
+    /// and keep its auto-detected cameras.
+    ///
+    /// This test exists because `Config::load` degrades to ALL defaults
+    /// on a parse error, silently. A malformed generated config would
+    /// therefore not look like a broken install -- it would quietly put
+    /// `camera` back to /dev/video0 and `mode` back to rgb, and the user
+    /// would be told the auto-detection worked. `ir_camera` is absent
+    /// here on purpose: that is what a machine with no IR sensor gets,
+    /// and it must stay absent rather than becoming a bogus node.
+    #[test]
+    fn generated_postinst_config_keeps_its_values() {
+        let c = parse(concat!(
+            "enabled = false\n",
+            "strictness = \"light\"\n",
+            "mode = \"auto\"\n",
+            "tau = 0.40\n",
+            "vote_k = 3\n",
+            "vote_n = 5\n",
+            "scan_timeout_ms = 4000\n",
+            "max_failures = 5\n",
+            "lockout_secs = 60\n",
+            "require_attention = true\n",
+            "camera = \"/dev/video1\"\n",
+            "ir_camera = \"/dev/video3\"\n",
+            "worker_socket = \"/run/faceid-nim/worker/vision.sock\"\n",
+            "auth_socket = \"/run/faceid-nim/auth.sock\"\n",
+        ));
+        assert_eq!(c.mode, CameraMode::Auto, "mode silently fell back");
+        assert_eq!(c.camera, "/dev/video1", "camera silently fell back");
+        assert_eq!(c.ir_camera.as_deref(), Some("/dev/video3"));
+        assert!(!c.enabled, "install must never enable face unlock");
+    }
+
+    #[test]
+    fn generated_config_without_ir_sensor_keeps_rgb_camera() {
+        let c = parse(concat!(
+            "enabled = false\n",
+            "mode = \"auto\"\n",
+            "camera = \"/dev/video0\"\n",
+        ));
+        assert_eq!(c.camera, "/dev/video0", "camera silently fell back");
+        assert_eq!(c.mode, CameraMode::Auto);
+        assert_eq!(c.ir_camera, None);
     }
 }

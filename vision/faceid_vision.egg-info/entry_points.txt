@@ -1,2 +1,0 @@
-[console_scripts]
-faceid-vision = faceid_vision.__main__:main

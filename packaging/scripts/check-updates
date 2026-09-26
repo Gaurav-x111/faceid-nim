@@ -1,0 +1,61 @@
+#!/bin/sh
+# check-updates -- report stale models without downloading anything.
+#
+# Compares installed /var/lib files against the pinned manifest hashes,
+# and reports whether fetch-models would change anything. Read-only:
+# never writes, never needs root to *check* (only to fix).
+#
+# Installed as /usr/libexec/faceid-nim/check-updates.
+set -eu
+
+MANIFEST="${FACEID_MANIFEST:-/usr/share/faceid-nim/models/manifest.toml}"
+MODEL_DIR="${FACEID_MODEL_DIR:-/var/lib/faceid-nim/models}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --manifest) MANIFEST="$2"; shift 2 ;;
+        --model-dir) MODEL_DIR="$2"; shift 2 ;;
+        -h|--help) echo "Usage: check-updates [--manifest PATH] [--model-dir PATH]"; exit 0 ;;
+        *) echo "check-updates: unknown option $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -r "$MANIFEST" ] || { echo "check-updates: cannot read $MANIFEST" >&2; exit 1; }
+
+PARSED="$(awk '
+    /^[[:space:]]*\[model\./ {
+        if (name != "") print name "\t" file "\t" sha
+        name = $0; sub(/^[[:space:]]*\[model\./, "", name); sub(/\].*$/, "", name)
+        file = ""; sha = ""
+        next
+    }
+    /^[[:space:]]*file[[:space:]]*=/  { file = $0; sub(/^[^"]*"/, "", file); sub(/".*$/, "", file); next }
+    /^[[:space:]]*sha256[[:space:]]*=/{ sha  = $0; sub(/^[^"]*"/, "", sha);  sub(/".*$/, "", sha);  next }
+    END { if (name != "") print name "\t" file "\t" sha }
+' "$MANIFEST")"
+
+stale=0
+echo "$PARSED" | while IFS="$(printf '\t')" read -r name file sha; do
+    case "$sha" in
+        ""|REPLACE_ME*|*[!0-9a-fA-F]*)
+            echo "  $name: unpinned (optional) - skipped"; continue ;;
+    esac
+    dest="$MODEL_DIR/$file"
+    if [ ! -f "$dest" ]; then
+        echo "  $name: STALE (missing $file - run: sudo faceid-nim fetch-models)"
+        continue
+    fi
+    got="$(sha256sum "$dest" | cut -d' ' -f1)"
+    if [ "$got" != "$sha" ]; then
+        echo "  $name: STALE (hash differs - run: sudo faceid-nim fetch-models --force)"
+    else
+        echo "  $name: up to date"
+    fi
+done
+
+# Wayland/GDM reminder: extension covers GNOME lock screen; GDM login
+# works via common-auth once enabled in the app.
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    echo "Note: Wayland session detected - lock-screen island needs one logout/login after install."
+fi
+echo "Done. Fix with: sudo faceid-nim fetch-models"

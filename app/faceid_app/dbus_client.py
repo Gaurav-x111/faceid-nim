@@ -50,11 +50,30 @@ class Daemon:
     def delete_identity(self, name: str) -> None:
         self._call("DeleteIdentity", GLib.Variant("(s)", (name,)))
 
+    def delete_identity_async(self, name: str, callback) -> None:
+        def finished(_reply, error):
+            callback(error)
+
+        self._call_async("DeleteIdentity", GLib.Variant("(s)", (name,)), finished)
+
     def delete_all_data(self) -> None:
         self._call("DeleteAllData")
 
+    def delete_all_data_async(self, callback) -> None:
+        def finished(_reply, error):
+            callback(error)
+
+        self._call_async("DeleteAllData", None, finished)
+
     def set_identity_enabled(self, name: str, enabled: bool) -> None:
         self._call("SetIdentityEnabled", GLib.Variant("(sb)", (name, enabled)))
+
+    def set_identity_enabled_async(self, name: str, enabled: bool, callback) -> None:
+        def finished(_reply, error):
+            callback(error)
+
+        self._call_async(
+            "SetIdentityEnabled", GLib.Variant("(sb)", (name, enabled)), finished)
 
     def test_scan(self) -> tuple[bool, str]:
         """Run a real scan (no unlock, no failure counter). The daemon
@@ -102,8 +121,57 @@ class Daemon:
     def set_settings(self, settings: dict) -> None:
         self._call("SetSettings", GLib.Variant("(s)", (json.dumps(settings),)))
 
+    def _call_async(self, method: str, variant: GLib.Variant | None, callback,
+                      timeout_ms: int = 60000) -> None:
+        def done(proxy, result, _user_data):
+            try:
+                reply = proxy.call_finish(result)
+                error = None
+            except GLib.Error as e:
+                reply, error = None, e.message
+            callback(reply, error)
+
+        self.proxy.call(
+            method, variant,
+            Gio.DBusCallFlags.ALLOW_INTERACTIVE_AUTHORIZATION, timeout_ms, None, done, None)
+
+    def set_settings_async(self, settings: dict, callback) -> None:
+        def finished(_reply, error):
+            callback(error)
+
+        self._call_async("SetSettings", GLib.Variant("(s)", (json.dumps(settings),)), finished)
+
+    def set_pam_enabled(self, enabled: bool) -> None:
+        """Enable or disable the PAM profile after a polkit prompt."""
+        self._call("SetPamEnabled", GLib.Variant("(b)", (bool(enabled),)))
+
+    def set_pam_enabled_async(self, enabled: bool, callback) -> None:
+        def finished(_reply, error):
+            callback(error)
+
+        self._call_async("SetPamEnabled", GLib.Variant("(b)", (bool(enabled),)), finished)
+
     def diagnostics(self) -> dict:
         return json.loads(self._call("Diagnostics")[0])
+
+    def get_timeline(self) -> list:
+        """Opt-in lock/unlock timeline (JSON list, newest last)."""
+        try:
+            return json.loads(self._call("GetTimeline", timeout_ms=10000)[0])
+        except DaemonError:
+            return []
+
+    def get_timeline_async(self, callback) -> None:
+        def finished(reply, error):
+            if error or reply is None:
+                callback([], error)
+                return
+            try:
+                callback(json.loads(reply[0]), None)
+            except (TypeError, ValueError) as e:
+                callback([], str(e))
+
+        self._call_async("GetTimeline", None, finished, timeout_ms=10000)
 
     def subscribe_state(self, cb) -> int:
         """cb(state: str, progress: float, reason: str)"""

@@ -142,7 +142,38 @@ else
 fi
 echo
 
-# 8. Config file
+# 8. Session (Wayland/X11) + GDM note
+echo "Session:"
+echo "  XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unknown} XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unknown}"
+if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
+    echo "  Wayland: lock-screen island needs one logout/login after install."
+fi
+# GDM greeter itself cannot show the island; GDM *password* stacks work
+# via common-auth once enabled in the app. Direct gdm-password edit is
+# unsupported -- common-auth is the only supported path.
+if grep -q "pam_faceid.so" /etc/pam.d/gdm-password 2>/dev/null; then
+    echo "  gdm-password has a DIRECT pam_faceid.so line (unsupported; use common-auth)"
+fi
+echo
+
+# 9. IR emitter
+echo "IR emitter:"
+if command -v linux-enable-ir-emitter &>/dev/null; then
+    echo "  linux-enable-ir-emitter: installed"
+else
+    echo "  linux-enable-ir-emitter: NOT installed (passive IR only)"
+    echo "  sudo apt install linux-enable-ir-emitter, then: sudo faceid-nim ir-emitter --enable"
+fi
+if command -v v4l2-ctl &>/dev/null; then
+    for dev in /dev/video*; do
+        if [[ -c "$dev" ]] && v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null | grep -q GREY; then
+            echo "  $dev: advertises GREY (IR-capable?)"
+        fi
+    done
+fi
+echo
+
+# 10. Config file
 echo "Daemon config (/etc/faceid-nim/config.toml):"
 if [[ -f /etc/faceid-nim/config.toml ]]; then
     cat /etc/faceid-nim/config.toml
@@ -151,7 +182,7 @@ else
 fi
 echo
 
-# 9. Recent logs
+# 11. Recent logs
 echo "Recent daemon logs (last 10):"
 journalctl -u faceid-nimd -n 10 --no-pager 2>/dev/null || echo "  No logs"
 echo

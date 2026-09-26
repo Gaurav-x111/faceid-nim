@@ -31,7 +31,53 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -e './vision[dev]'
-      - run: pytest -q vision/tests
+      - run: PYTHONPATH=vision:app pytest -q vision/tests app/tests
+
+  # The one CI job that would have caught the class of bug that shipped a
+  # worker whose build_engine could not run: a syntax error in a module
+  # no test imported, and a landmark backend that fails on the wheel the
+  # packaging actually installs. Both are invisible to unit tests that
+  # inject fakes, so they get a real environment and a real import.
+  packaged-worker:
+    name: packaged worker venv really starts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Build the venv exactly as debian/rules does
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-cache-dir --upgrade pip wheel
+          cp -r vision /tmp/faceid-vision-pkg
+          /tmp/venv/bin/pip install --no-cache-dir '/tmp/faceid-vision-pkg[liveness]'
+      - name: Every module must import
+        run: |
+          /tmp/venv/bin/python3 -c "
+          import importlib
+          for m in ('models','hardware','rt','landmarks','scan','protocol',
+                    'camera','embed','detect','fuse','matching','quality',
+                    'align','cameras','__main__'):
+              importlib.import_module('faceid_vision.' + m)
+          print('all vision modules import')"
+      - name: The landmark backend must be honest about itself
+        # Not "must be available" -- availability depends on the model
+        # file, which is fetched at install time, not built here. What
+        # must hold is that the registry reports a *reason* instead of a
+        # bare False, so a degraded install is never silent.
+        run: |
+          /tmp/venv/bin/python3 -c "
+          from faceid_vision.landmarks import FaceMesh
+          fm = FaceMesh()
+          assert fm.available or fm.reason, 'a dead landmark backend must say why'
+          print('landmark backend:', fm.backend, '|', fm.reason[:90] or 'available')"
+      - name: Hardware probe never raises and never trusts the provider list
+        run: |
+          /tmp/venv/bin/python3 -c "
+          from faceid_vision import hardware
+          p = hardware.probe(None, use_cache=False)
+          assert p.intra_op_threads >= 1
+          print('hardware:', p.summary())"
 
   replay:
     # Runs the real worker over recorded clips, so anti-spoofing is
@@ -54,6 +100,97 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y gjs
       - name: Parse-check the extension
-        run: for f in shell-ext/faceid@nim/*.js; do gjs -c "$(cat "$f" | head -0)" || true; node --input-type=module --check < "$f"; done
+        run: for f in shell-ext/faceid@nim/*.js; do node --input-type=module --check < "$f"; done
+
+  # The packaging must stay buildable for BOTH architectures. An arm64
+  # .deb is the only way most modern laptops get this at all, and it is
+  # also the one that used to be impossible: mediapipe has no arm64
+  # wheel, so the liveness extra has to be allowed to fail without taking
+  # the whole package down with it.
+  deb:
+    name: deb (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            dpkg: amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            dpkg: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debhelper python3-all python3-venv \
+                                      libpam0g-dev meson ninja-build build-essential
+      # The daemon needs rustc >= 1.75. The runner's apt rustc is older,
+      # and rustup does not register dpkg packages -- which is why the
+      # build below passes DEB_FLAGS=-d.
+      - name: Install a current Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustc --version
+          cargo --version
+      - name: Build the .deb for ${{ matrix.arch }}
+        run: |
+          # DEB_FLAGS=-d: rustup does not install dpkg packages, so the
+          # Build-Depends check cannot pass on any runner.
+          make deb DEB_FLAGS=-d
+      - name: The package must contain what the docs promise
+        run: |
+          set -eu
+          deb=$(ls -1 dist/faceid-nim_*.deb | head -1)
+          echo "built: $deb"
+          # The architecture must be the one we built for. A stanza left
+          # as "any" silently produces faceid-nim_<ver>_any.deb from
+          # EVERY matrix leg, so one architecture replaces the other on
+          # the release page and install.sh 404s on both. This assertion
+          # is what stops that coming back.
+          got=$(dpkg-deb -f "$deb" Architecture)
+          echo "Architecture: $got"
+          if [ "$got" = "any" ]; then
+            echo "FAIL: package declares Architecture: any but ships a"
+            echo "      compiled daemon, a compiled PAM module and arch-"
+            echo "      specific wheels. Check override_dh_gencontrol."
+            exit 1
+          fi
+          [ "$got" = "${{ matrix.dpkg }}" ] || {
+            echo "FAIL: expected ${{ matrix.dpkg }}, got $got"; exit 1; }
+          # And the binary must match the declared architecture.
+          case "$got" in
+            amd64) want="X86-64" ;;
+            arm64) want="AArch64" ;;
+            *) want="" ;;
+          esac
+          if [ -n "$want" ]; then
+            tmp=$(mktemp -d)
+            dpkg-deb -x "$deb" "$tmp"
+            gotelf=$(readelf -h "$tmp/usr/libexec/faceid-nim/faceid-nimd" \
+                     | awk -F: '/Machine/{gsub(/^ +/,"",$2); print $2}')
+            echo "faceid-nimd machine: $gotelf"
+            case "$gotelf" in
+              *"$want"*) : ;;
+              *) echo "FAIL: declared $got but the binary is $gotelf"
+                 exit 1 ;;
+            esac
+            rm -rf "$tmp"
+          fi
+          dpkg-deb -c "$deb" | grep -q usr/libexec/faceid-nim/faceid-nimd
+          dpkg-deb -c "$deb" | grep -q usr/libexec/faceid-nim/venv/bin/python3
+          dpkg-deb -c "$deb" | grep -q lib/systemd/system/faceid-nim-fetch-models.service
+          dpkg-deb -c "$deb" | grep -q usr/libexec/faceid-nim/gpu-devices
+          dpkg-deb -c "$deb" | grep -q usr/bin/faceid-app
+          # Face unlock must never be switched on by installing a package.
+          dpkg-deb --ctrl-tarfile "$deb" | tar -xO ./postinst | grep -q 'enabled = false'
+          echo "package layout OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: faceid-nim-${{ matrix.arch }}
+          path: ../faceid-nim_*.deb

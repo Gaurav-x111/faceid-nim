@@ -10,3 +10,13 @@
     notifempty
     create 0600 root root
 }
+
+/var/log/faceid-nim/timeline.jsonl {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}

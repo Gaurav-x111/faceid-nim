@@ -15,12 +15,21 @@ CONFIG=/etc/faceid-nim/config.toml
 
 usage() {
     cat <<'USAGE'
-Usage: faceid-nim <command>
+Usage: faceid-nim <command> [options]
 
   fetch-models      Download and verify the models listed in the manifest
   verify            Check that every model is present and checksum-verified
   status            Show daemon, worker, model and config state
   restart           Restart both services (requires root)
+  diagnose          Full report: services, sockets, cameras, IR emitter,
+                    models, PAM (incl. GDM), Wayland session, config, logs
+  tune              Hardware-aware suggestion: camera mode, tau, votes
+                    (never weakens silently; --apply needs root + polkit app)
+  audit             Show recent auth audit events (requires root)
+  timeline          Show opt-in lock/unlock timeline (requires root)
+  check-updates     Check models/manifest for updates (no download)
+  ir-emitter        Probe/enable the IR emitter (needs linux-enable-ir-emitter)
+  devices           List /dev/video* with RGB/IR classification
 
 Face unlock is enabled in the Face Unlock app, not here.
 Your password always works; see /usr/share/doc/faceid-nim/README.md.
@@ -78,6 +87,7 @@ case "$cmd" in
         echo "Services"
         echo "  faceid-nimd    : $(unit_state faceid-nimd.service)"
         echo "  faceid-vision  : $(unit_state faceid-vision.service)"
+        echo "  fetch-models   : $(unit_state faceid-nim-fetch-models.service)"
         echo
         echo "Sockets"
         for s in /run/faceid-nim/auth.sock /run/faceid-nim/worker/vision.sock; do
@@ -95,12 +105,69 @@ case "$cmd" in
             echo "  verify-models not installed"
         fi
         echo
+        # What is actually running, as opposed to what is installed. A
+        # machine where the landmark backend failed to load used to look
+        # perfectly healthy here while blink, 3D and the attention check
+        # were doing nothing at all.
+        echo "Liveness (what is actually running)"
+        if [ -S /run/faceid-nim/worker/vision.sock ] \
+           && [ -x "$LIBEXEC/venv/bin/python3" ]; then
+            "$LIBEXEC/venv/bin/python3" - <<'PY' 2>/dev/null || echo "  (worker did not report)"
+import json, socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(3)
+try:
+    s.connect("/run/faceid-nim/worker/vision.sock")
+    s.sendall(b'{"op":"capabilities","id":"status"}\n')
+    buf = b""
+    while b"\n" not in buf:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c = json.loads(buf.split(b"\n", 1)[0])
+except Exception:
+    raise SystemExit(1)
+
+def one(t, limit=170):
+    """First line of a reason, capped. The cap is generous on purpose:
+    the actionable part of these messages ("run: sudo faceid-nim
+    fetch-models") is at the END, so truncating hard would throw away
+    the only part the user can act on."""
+    if not t:
+        return ""
+    line = t.splitlines()[0].strip()
+    return line if len(line) <= limit else line[:limit - 1] + "\u2026"
+
+mesh = c.get("mesh")
+print(f'  landmarks      : {c.get("landmarks", "none")}'
+      + ('' if mesh else f'  UNAVAILABLE ({one(c.get("landmarks_reason"))})'))
+anti = c.get("antispoof")
+print(f'  ML anti-spoof  : {"active" if anti else "unavailable"}'
+      + ('' if anti else f'  ({one(c.get("antispoof_reason"))})'))
+acc = c.get("accel") or {}
+eps = "+".join(acc.get("providers") or ["?"])
+print(f'  inference      : {eps}, {acc.get("threads", "?")} thread(s) '
+      f'of {acc.get("cpu_count", "?")} available'
+      + (f', {acc.get("arch", "?")}' if acc.get("arch") else '')
+      + ('  [unverified]' if acc.get("unverified") else ''))
+print(f'  model          : {c.get("model_id", "?")} '
+      f'({c.get("embedding_dim", "?")}-d)')
+print(f'  ir sensor      : '
+      f'{"configured" if c.get("ir") else "not configured"}')
+PY
+        else
+            echo "  worker not running; cannot report what is active"
+        fi
+        echo
         echo "Config ($CONFIG)"
         if [ -r "$CONFIG" ]; then
             echo "  enabled        : $(config_flag enabled)"
             echo "  strictness     : $(config_flag strictness)"
             echo "  mode           : $(config_flag mode)"
             echo "  tau            : $(config_flag tau)"
+            echo "  camera         : $(config_flag camera)"
+            echo "  ir_camera      : $(config_flag ir_camera)"
         else
             echo "  not readable (run as root to see it)"
         fi
@@ -118,6 +185,81 @@ case "$cmd" in
         systemctl restart faceid-nimd.service
         systemctl restart faceid-vision.service
         echo "restarted"
+        ;;
+
+    diagnose|--diagnose|-d)
+        if [ -x "$LIBEXEC/faceid-nim-diagnose" ]; then
+            exec "$LIBEXEC/faceid-nim-diagnose" "$@"
+        elif [ -x /usr/share/faceid-nim/app/faceid_app/main.py ]; then
+            exec python3 /usr/share/faceid-nim/app/faceid_app/main.py --diagnose "$@"
+        else
+            echo "faceid-nim: diagnose helper not installed" >&2; exit 1
+        fi
+        ;;
+
+    tune)
+        # Hardware-aware suggestion only; applying goes through the app
+        # (polkit) so a script can never silently lower tau.
+        if python3 -c "import faceid_app.auto_tune" 2>/dev/null; then
+            exec python3 -m faceid_app.auto_tune "$@"
+        elif [ -f /usr/share/faceid-nim/app/faceid_app/auto_tune.py ]; then
+            exec python3 /usr/share/faceid-nim/app/faceid_app/auto_tune.py "$@"
+        else
+            echo "faceid-nim: auto_tune.py not installed" >&2; exit 1
+        fi
+        ;;
+
+    audit)
+        need_root audit
+        log="${FACEID_AUDIT_LOG:-/var/log/faceid-nim/audit.log}"
+        n="${2:-20}"
+        [ -f "$log" ] || { echo "no audit log yet ($log)"; exit 0; }
+        # Never print embeddings/scores: audit lines contain none by design,
+        # but guard against future fields leaking here.
+        tail -n "$n" "$log" 2>/dev/null || tail -n 20 "$log"
+        ;;
+
+    timeline)
+        log="${FACEID_TIMELINE_LOG:-/var/log/faceid-nim/timeline.jsonl}"
+        n="${2:-20}"
+        [ -f "$log" ] || { echo "timeline is empty (enable Audit timeline in the app)"; exit 0; }
+        tail -n "$n" "$log" 2>/dev/null || tail -n 20 "$log"
+        ;;
+
+    check-updates)
+        if [ -x "$LIBEXEC/check-updates" ]; then
+            exec "$LIBEXEC/check-updates" "$@"
+        else
+            echo "faceid-nim: check-updates helper not installed" >&2; exit 1
+        fi
+        ;;
+
+    ir-emitter)
+        if [ -x "$LIBEXEC/ir-emitter" ]; then
+            exec "$LIBEXEC/ir-emitter" "$@"
+        else
+            echo "faceid-nim: ir-emitter helper not installed" >&2; exit 1
+        fi
+        ;;
+
+    devices)
+        for dev in /dev/video*; do
+            [ -c "$dev" ] || continue
+            if command -v v4l2-ctl >/dev/null 2>&1; then
+                card="$(v4l2-ctl -d "$dev" --info 2>/dev/null | grep 'Card type' | cut -d: -f2 | xargs || echo unknown)"
+                fmts="$(v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null | grep -c "GREY\|YUYV\|MJPG" || echo 0)"
+                mono="$(v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null | grep -c GREY || true)"
+                if [ "$mono" -gt 0 ] && [ "$fmts" -eq "$mono" ]; then
+                    kind="IR?"
+                else
+                    kind="RGB"
+                fi
+                echo "  $dev [$kind] $card"
+            else
+                echo "  $dev (install v4l-utils for details)"
+            fi
+        done
+        echo "Session: ${XDG_SESSION_TYPE:-unknown} desktop=${XDG_CURRENT_DESKTOP:-unknown}"
         ;;
 
     ""|-h|--help|help)

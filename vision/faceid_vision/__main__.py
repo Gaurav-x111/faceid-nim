@@ -68,21 +68,76 @@ def _open_with_retry(device: str, attempts: int = 2):
     return _open(device, attempts)
 
 
+# Last auto decision in this worker process, for hysteresis: an
+# in-band reading keeps the previous spectrum instead of flickering.
+_LAST_AUTO = "rgb"
+
+
+def _sample_luma(device: str, frames: int = 5) -> float | None:
+    """Open the RGB device briefly and return mean luma, or None."""
+    try:
+        from .meter import mean_luma_bgr  # noqa: PLC0415
+        with _open_with_retry(device) as cam:
+            acc: list[float] = []
+            try:
+                for _ts, frame in cam.frames(0.6):
+                    acc.append(mean_luma_bgr(frame))
+                    if len(acc) >= frames:
+                        break
+            except Exception:
+                pass
+            if not acc:
+                return None
+            return sum(acc) / len(acc)
+    except Exception:
+        return None
+
+
 def _handle_scan(engine: ScanEngine, msg: dict, args, send) -> dict:
     sid = msg.get("id", "s0")
+    global _LAST_AUTO
 
     # Resolve the active mode. The daemon always sends an explicit
     # "mode"; only a mode-less request (CLI oneshot) needs to classify
     # the stream. A V4L2 node that advertises only monochrome formats
     # is an IR/IR-like stream, where the RGB screen cues would
     # false-positive on sensor noise (see ScanConfig.mode).
+    # "auto" measures room light on the RGB device per scan and resolves
+    # to "ir" (dark) or "rgb" (lit) before anything else runs.
     msg_mode = msg.get("mode")
-    if msg_mode in ("rgb", "ir", "both", "hybrid"):
+    if msg_mode in ("rgb", "ir", "both", "hybrid", "auto"):
         mode = msg_mode
     else:
         cli_mode = getattr(args, "mode", "auto")
         mode = cli_mode if cli_mode != "auto" else _classify_mode(
             args.source if args.source else args.device)
+
+    req_device = msg.get("device") or None
+    cli_primary = args.source if args.source else args.device
+    rgb_device = req_device or cli_primary
+    ir_dev_field = msg.get("ir_device") or getattr(args, "ir_device", None)
+
+    auto_luma: float | None = None
+    if mode == "auto":
+        from .meter import AUTO_DARK_LUMA, AUTO_LIGHT_LUMA, pick_spectrum  # noqa: PLC0415
+        dark_thr = float(getattr(args, "auto_dark_luma", AUTO_DARK_LUMA))
+        light_thr = float(getattr(args, "auto_light_luma", AUTO_LIGHT_LUMA))
+        auto_luma = _sample_luma(rgb_device)
+        if auto_luma is None:
+            # RGB unreadable (busy/missing): prefer IR when hardware
+            # exists, else fall back to RGB and let the scan report it.
+            mode = "ir" if ir_dev_field else "rgb"
+            log.info("auto: RGB metering failed, falling back to %s", mode)
+        else:
+            picked, _ = pick_spectrum(auto_luma, _LAST_AUTO,
+                                      dark=dark_thr, light=light_thr)
+            # Dark is only useful when an IR sensor exists; otherwise a
+            # dark room still scans (poorly) on RGB rather than erroring.
+            if picked == "ir" and not ir_dev_field:
+                picked = "rgb"
+            mode = picked
+            _LAST_AUTO = picked
+            log.info("auto: luma=%.1f -> %s", auto_luma, mode)
 
     # The IR camera is secondary analysis hardware. It is opened only
     # for modes that ask for IR cues. An "rgb"-mode scan never opens it,
@@ -91,28 +146,36 @@ def _handle_scan(engine: ScanEngine, msg: dict, args, send) -> dict:
     # happen to be attached -- never be inferred from the negotiated
     # frame's channel count.
     if mode in ("ir", "both", "hybrid"):
-        ir_device = msg.get("ir_device") or args.ir_device
+        ir_device = ir_dev_field
     else:
         ir_device = None
-    if msg_mode not in ("rgb", "ir", "both", "hybrid"):
+    if msg_mode not in ("rgb", "ir", "both", "hybrid", "auto"):
         log.debug("mode-less request: classified stream as %s", mode)
 
-    cfg = ScanConfig(
-        timeout_ms=int(msg.get("timeout_ms", 4000)),
-        strictness=Strictness(msg.get("strict", "light")),
-        use_challenge=bool(msg.get("challenge", False)),
-        mode=mode,
-        # Set only by an enrollment request. See the ENROLL PREVIEW
-        # INTEGRATION HOOK in scan.py.
-        preview=bool(msg.get("preview", False)) or msg.get("op") == "enroll",
-    )
+    cfg = None
+    try:
+        cfg = ScanConfig(
+            timeout_ms=int(msg.get("timeout_ms", 4000)),
+            strictness=Strictness(msg.get("strict", "light")),
+            use_challenge=bool(msg.get("challenge", False)),
+            mode=mode,
+            # Set only by an enrollment request. See the ENROLL PREVIEW
+            # INTEGRATION HOOK in scan.py.
+            preview=bool(msg.get("preview", False)) or msg.get("op") == "enroll",
+        )
+    except (ValueError, TypeError) as e:
+        return ev_error(sid, f"bad_request: {e}")
 
-    # When mode is "ir", use IR camera as primary; otherwise use RGB camera
+    # When mode is "ir", use IR camera as primary; otherwise use RGB camera.
+    # The daemon sends the resolved primary in "device" (from
+    # /etc/faceid-nim/config.toml camera). Fall back to the CLI default
+    # only for old daemons / manual oneshot runs. (req_device/cli_primary
+    # already resolved above for the auto light meter; reuse them.)
     if mode == "ir" and ir_device:
         primary_device = ir_device
-        secondary_device = args.source if args.source else args.device
+        secondary_device = rgb_device
     else:
-        primary_device = args.source if args.source else args.device
+        primary_device = rgb_device
         secondary_device = ir_device
 
     try:
@@ -137,8 +200,41 @@ def _handle_scan(engine: ScanEngine, msg: dict, args, send) -> dict:
 
     if res.error:
         return ev_error(sid, res.error)
+    # Recognition spectrum is the resolved primary: "ir" when the IR
+    # sensor was primary, else "rgb". ("both"/"hybrid" stay RGB-primary.)
+    spectrum = "ir" if mode == "ir" else "rgb"
     return ev_done(sid, res.embeddings, res.model_id, res.liveness.to_json(),
-                   res.frames, res.usable, res.elapsed_ms)
+                   res.frames, res.usable, res.elapsed_ms,
+                   spectrum=spectrum, luma=auto_luma)
+
+
+def _accel_info(embedder) -> dict:
+    """What the recogniser is really running on.
+
+    `providers` is read back from the live session rather than from what
+    was requested: onnxruntime downgrades to CPU with only a log line
+    when a provider's driver is unusable, so the request is not evidence.
+    """
+    from . import hardware
+
+    try:
+        live = list(embedder.providers)
+    except Exception:
+        live = []
+    try:
+        prof = hardware.profile()
+    except Exception:
+        prof = None
+    out = {
+        "providers": live or [hardware.CPU_EXECUTION_PROVIDER],
+        "cpu_count": prof.cpu_count if prof else 0,
+        "threads": prof.intra_op_threads if prof else 0,
+        "features": list(prof.cpu_features) if prof else [],
+        "arch": prof.arch if prof else "",
+    }
+    if prof and prof.unverified:
+        out["unverified"] = True
+    return out
 
 
 def _serve(engine: ScanEngine, args) -> int:
@@ -191,6 +287,9 @@ def _session(engine: ScanEngine, conn: socket.socket, args) -> None:
         if not chunk:
             return
         buf += chunk
+        if len(buf) > (1 << 20):
+            send(ev_error("?", "bad_request: line too long"))
+            return
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
             if not line.strip():
@@ -204,13 +303,25 @@ def _session(engine: ScanEngine, conn: socket.socket, args) -> None:
             if op == "ping":
                 send({"id": msg.get("id", ""), "ev": "pong"})
             elif op == "capabilities":
+                # Reports what is *actually* running, plus why anything
+                # optional is not. Every field here is a claim the app and
+                # `faceid-nim status` are allowed to show the user, so an
+                # unproven claim here is a lie in the UI. Nothing may
+                # report a feature as working unless it is.
+                mesh = engine.mesh
+                anti = engine.antispoof
+                emb = engine.embedder
                 send({
                     "id": msg.get("id", ""), "ev": "capabilities",
-                    "mesh": engine.mesh.available,
-                    "antispoof": engine.antispoof.available,
-                    "model_id": engine.embedder.model_id,
-                    "embedding_dim": engine.embedder.dim,
+                    "mesh": bool(getattr(mesh, "available", False)),
+                    "landmarks": getattr(mesh, "backend", "none"),
+                    "landmarks_reason": getattr(mesh, "reason", ""),
+                    "antispoof": bool(getattr(anti, "available", False)),
+                    "antispoof_reason": getattr(anti, "reason", ""),
+                    "model_id": emb.model_id,
+                    "embedding_dim": emb.dim,
                     "ir": bool(args.ir_device),
+                    "accel": _accel_info(emb),
                 })
             elif op in ("scan", "enroll"):
                 send(_handle_scan(engine, msg, args, send))
@@ -229,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     p = argparse.ArgumentParser(prog="faceid-vision")
-    p.add_argument("--socket", default="/run/faceid-nim/vision.sock")
+    p.add_argument("--socket", default="/run/faceid-nim/worker/vision.sock")
     p.add_argument("--device", default="/dev/video0")
     p.add_argument("--ir-device", default=None)
     p.add_argument("--source", default=None,
@@ -245,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="run a single scan, print JSON, exit")
     p.add_argument("--strict", default="light", choices=[s.value for s in Strictness])
     p.add_argument("--timeout-ms", type=int, default=4000)
+    p.add_argument("--auto-dark-luma", type=float, default=28.0,
+                   help="below this mean luma, auto mode uses IR")
+    p.add_argument("--auto-light-luma", type=float, default=42.0,
+                   help="above this mean luma, auto mode uses RGB")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 

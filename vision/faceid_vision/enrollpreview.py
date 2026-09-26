@@ -66,9 +66,10 @@ class PreviewState:
 
 def thumbnail(frame_bgr: np.ndarray, cfg: PreviewConfig) -> np.ndarray:
     h, w = frame_bgr.shape[:2]
-    scale = cfg.long_edge / float(max(h, w))
+    scale = cfg.long_edge / float(max(1, max(h, w)))
     if scale < 1.0:
-        frame_bgr = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)),
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        frame_bgr = cv2.resize(frame_bgr, (nw, nh),
                                interpolation=cv2.INTER_AREA)
     if cfg.mirror:
         frame_bgr = cv2.flip(frame_bgr, 1)

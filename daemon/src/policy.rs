@@ -64,8 +64,12 @@ impl Policy {
     pub fn record_failure(&mut self, uid: u32, max_failures: u32, lockout: Duration) -> bool {
         let a = self.per_uid.entry(uid).or_default();
         a.failures += 1;
+        // Clamp attacker-influenced values: max_failures comes from
+        // SetSettings, lockout from config. Saturating add never panics.
+        let max_failures = max_failures.clamp(1, 20);
+        let lockout = lockout.min(Duration::from_secs(3600));
         if a.failures >= max_failures {
-            a.locked_until = Some(Instant::now() + lockout);
+            a.locked_until = Instant::now().checked_add(lockout);
             return true;
         }
         false

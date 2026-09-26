@@ -47,8 +47,29 @@ APP_ID = "org.faceidnim.App"
 
 # User-facing camera choices (stored in the app's own prefs, resolved
 # against actual discovered hardware before touching the daemon).
-CAMERA_MODE_LABELS = ["Automatic", "Normal camera (RGB)", "IR camera"]
-CAMERA_MODE_VALUES = ["auto", "rgb", "ir"]
+CAMERA_MODE_LABELS = ["Automatic", "Normal camera (RGB)", "IR camera", "Hybrid (RGB + IR)"]
+CAMERA_MODE_VALUES = ["auto", "rgb", "ir", "hybrid"]
+
+
+def _safe_timeout(v, default: float = 4000.0) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(f):
+        return default
+    return max(500.0, min(15000.0, f))
+
+
+def _combo_index(combo, idx: int) -> int:
+    """Clamp a Gtk DropDown index; INVALID_LIST_POSITION (4294967295)."""
+    try:
+        n = len(combo.get_model()) if combo.get_model() else 0
+    except Exception:
+        n = 0
+    if idx is None or idx < 0 or idx >= max(1, n):
+        return 0
+    return idx
 
 
 def _rgba_tuple(text: str) -> tuple:
@@ -118,24 +139,51 @@ def setup_logging(debug: bool = False) -> None:
     root.info("app starting (pid %s)", os.getpid())
 
 STRICTNESS_NOTES = {
-    "off": ("Off: faces are never used to refuse access. Enrolled "
-            "templates are still stored, but nothing is ever gatekept "
-            "by them."),
-    "light": ("Light: a single matching template unlocks right away. "
-              "Fast, and the default -- most convenient, least strict."),
-    "heavy": ("Heavy: positive evidence of a live 3D face (a blink or "
-              "head motion) is required before unlocking. Harder to "
-              "fool with a photo or video replay, at the cost of a "
-              "slower unlock."),
+    "off": ("Off: recognition only, without liveness checks. A matching "
+            "face still unlocks; a non-matching face still does not. Not "
+            "recommended."),
+    "light": ("Light: a single matching template unlocks right away, "
+              "unless a spoof cue vetoes it. Fast, and the default -- "
+              "most convenient, least strict."),
+    "heavy": ("Heavy: a matching face plus positive evidence of a live "
+              "3D face (a blink or head motion) is required before "
+              "unlocking. Harder to fool with a photo or video replay, "
+              "at the cost of a slower unlock."),
 }
 
 CLI_COMMANDS = [
     ("Service status", "faceid-nim status"),
+    ("Full diagnostics", "faceid-nim diagnose"),
     ("Fetch / verify models", "sudo faceid-nim fetch-models"),
     ("Re-check installed models", "sudo faceid-nim verify-models"),
+    ("Check for model updates", "faceid-nim check-updates"),
+    ("Hardware tune suggestion", "faceid-nim tune"),
+    ("IR emitter probe", "faceid-nim ir-emitter --probe"),
+    ("Camera list (RGB/IR)", "faceid-nim devices"),
+    ("Recent audit events", "sudo faceid-nim audit 20"),
+    ("Lock/unlock timeline", "faceid-nim timeline 20"),
     ("Watch daemon + worker logs", "journalctl -fu faceid-nimd -u faceid-vision"),
     ("Live D-Bus signal trace", "gdbus monitor --system --dest org.faceidnim.Daemon1"),
 ]
+
+def _find_video_pill_harness() -> str:
+    """Locate linux-anim/test_anim.py (Glance video-pill preview harness).
+
+    Dev tree first (repo root/linux-anim), then installed locations.
+    Returns "" when not found so the caller can toast instead of crashing.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "linux-anim", "test_anim.py"),
+        "/usr/share/faceid-nim/linux-anim/test_anim.py",
+        "/usr/share/glance-anim/test_anim.py",
+    ]
+    for c in candidates:
+        p = os.path.normpath(c)
+        if os.path.isfile(p):
+            return p
+    return ""
+
 
 def run_diagnose() -> int:
     """Terminal cameras+service report, no GUI needed (--diagnose)."""
@@ -213,6 +261,9 @@ class Window(Adw.ApplicationWindow):
         self._cam_rows: list = []
         self._opening_rows: list = []
         self._suspend_changes = False
+        self._refresh_openings_pending = False
+        self._opening_notify_id = 0
+        self._scanface_notify_id = 0
         self._refresh_generation = 0
         self._prefs = prefs.load()
         self._openings = openings.load()
@@ -437,6 +488,75 @@ class Window(Adw.ApplicationWindow):
         g.add(self.sp_timeout)
         page.add(g)
 
+        opts = Adw.PreferencesGroup(
+            title="Options",
+            description="Opt-in extras. All off by default.")
+        self.sw_timeline = Adw.SwitchRow(
+            title="Audit timeline (lock/unlock only)",
+            subtitle="JSON log of when this machine locked/unlocked. "
+                     "No sudo or command history is ever stored.")
+        self.sw_timeline.connect("notify::active", self.on_setting_changed)
+        opts.add(self.sw_timeline)
+        self.sw_speak = Adw.SwitchRow(
+            title="Speak greeting on unlock",
+            subtitle="Say your greeting on success. "
+                     "Per-user, stored on this machine only.")
+        self.sw_speak.connect("notify::active", self.on_speak_changed)
+        opts.add(self.sw_speak)
+        self.greeting_entry = Adw.EntryRow(title="Greeting text")
+        try:
+            self.greeting_entry.set_text(str(self._prefs.get("greeting_text", "Welcome {name}")))
+        except Exception:
+            pass
+        # EntryRow has no subtitle on libadwaita 1.4 — tooltip only.
+        try:
+            self.greeting_entry.set_tooltip_text("{name} = your identity")
+        except Exception:
+            pass
+        self._greeting_timer = 0
+        self.greeting_entry.connect("notify::text", self._on_greeting_edited)
+        opts.add(self.greeting_entry)
+        self.greeting_voice_entry = Adw.EntryRow(title="Voice (optional)")
+        try:
+            self.greeting_voice_entry.set_text(str(self._prefs.get("greeting_voice", "")))
+        except Exception:
+            pass
+        try:
+            self.greeting_voice_entry.set_tooltip_text("spd-say / espeak voice, blank = default")
+        except Exception:
+            pass
+        self.greeting_voice_entry.connect("notify::text", self._on_greeting_edited)
+        opts.add(self.greeting_voice_entry)
+        self.sp_greeting_rate = Adw.SpinRow.new_with_range(-100, 100, 5)
+        self.sp_greeting_rate.set_title("Speech speed")
+        self.sp_greeting_rate.set_subtitle("-100 slow … +100 fast, 0 = normal")
+        self.sp_greeting_rate.set_value(float(self._prefs.get("greeting_rate", 0)))
+        self.sp_greeting_rate.connect("notify::value", self._on_greeting_edited)
+        opts.add(self.sp_greeting_rate)
+        greet_test_row = Adw.ActionRow(
+            title="Hear greeting",
+            subtitle="Speaks your text now, no camera needed")
+        greet_test_btn = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
+        greet_test_btn.connect("clicked", lambda _b: self._test_greeting())
+        greet_test_row.add_suffix(greet_test_btn)
+        opts.add(greet_test_row)
+        tl_row = Adw.ActionRow(
+            title="View timeline",
+            subtitle="Lock/unlock JSON, newest last (empty until enabled)")
+        tl_btn = Gtk.Button(label="View", valign=Gtk.Align.CENTER)
+        tl_btn.connect("clicked", lambda _b: self._show_timeline())
+        tl_row.add_suffix(tl_btn)
+        opts.add(tl_row)
+        tune_row = Adw.ActionRow(
+            title="Auto-detect hardware + suggest threshold",
+            subtitle="Universal: works with RGB-only or IR machines, "
+                     "picks mode and suggests tau for your camera")
+        tune_btn = Gtk.Button(label="Auto-tune", valign=Gtk.Align.CENTER)
+        tune_btn.connect("clicked", lambda _b: self._auto_tune())
+        tune_row.add_suffix(tune_btn)
+        opts.add(tune_row)
+        page.add(opts)
+
         cam = Adw.PreferencesGroup(
             title="Camera",
             description="The daemon scans with the camera shown here. "
@@ -459,6 +579,11 @@ class Window(Adw.ApplicationWindow):
         self.ir_det_row = Adw.ActionRow(title="IR camera")
         self.ir_det_row.add_suffix(Gtk.Label(label="—"))
         cam.add(self.ir_det_row)
+
+        self.light_row = Adw.ActionRow(
+            title="Room light",
+            subtitle="unknown — refresh to sample")
+        cam.add(self.light_row)
 
         refresh_row = Adw.ActionRow(
             title="Refresh cameras",
@@ -707,8 +832,20 @@ class Window(Adw.ApplicationWindow):
             ind = ["off", "light", "heavy"].index(strict)
             self.cb_strict.set_selected(ind)
         self._update_strict_note(strict)
-        self.sp_timeout.set_value(float(s.get("scan_timeout_ms", 4000)))
+        self.sp_timeout.set_value(_safe_timeout(s.get("scan_timeout_ms", 4000)))
         self.sw_attention.set_active(bool(s.get("require_attention", True)))
+        self.sw_timeline.set_active(bool(s.get("timeline_enabled", False)))
+        self.sw_speak.set_active(bool(self._prefs.get("speak_greeting", False)))
+        self.sw_animations.set_active(
+            bool(self._prefs.get("animations_enabled", True)))
+        if self.greeting_entry.get_text() != str(self._prefs.get("greeting_text", "Welcome {name}")):
+            self.greeting_entry.set_text(str(self._prefs.get("greeting_text", "Welcome {name}")))
+        if self.greeting_voice_entry.get_text() != str(self._prefs.get("greeting_voice", "")):
+            self.greeting_voice_entry.set_text(str(self._prefs.get("greeting_voice", "")))
+        try:
+            self.sp_greeting_rate.set_value(float(self._prefs.get("greeting_rate", 0)))
+        except Exception:
+            pass
 
         # Camera block: selector reflects user intent (prefs), while the
         # detection rows and the daemon config reflect the resolved plan.
@@ -736,19 +873,26 @@ class Window(Adw.ApplicationWindow):
             self._push_plan(plan)
 
         worker_up = bool(diag.get("worker_reachable"))
+        models_ready = diag.get("models_ready")
+        live = self._liveness_health(diag)
         if not s.get("enabled"):
             self._set_status("warn", "Face unlock is off")
         elif not ids:
             self._set_status("warn", "Enabled but no faces enrolled")
         elif not worker_up:
             self._set_status("bad", "Worker is not responding — check the logs")
+        elif models_ready is False:
+            self._set_status("bad",
+                             "Models are missing — run: sudo faceid-nim fetch-models")
+        elif not live["ok"]:
+            self._set_status("warn", live["summary"])
         else:
             self._set_status("ok",
                              f"{len(ids)} face{'s' if len(ids) != 1 else ''} "
                              "enrolled — ready")
 
         for k, v in diag.items():
-            r = Adw.ActionRow(title=str(k).replace("_", " "),
+            r = Adw.ActionRow(title=prefs.diag_title(k),
                               subtitle=self._diag_value(v))
             self.diag_group.add(r)
             self._diag_rows.append(r)
@@ -761,23 +905,73 @@ class Window(Adw.ApplicationWindow):
             # One concise toast is enough; a down daemon must not make a
             # newly opened app look like it is throwing several errors.
             self.toast("Some service information could not be loaded")
+        # A feature that is not running gets said out loud, in the place
+        # the user looks. Silently implying a check that never ran is
+        # the failure mode this whole reporting chain exists to prevent.
+        if not live["ok"] and live["detail"]:
+            self.toast(live["detail"])
         self._refresh_openings()
         return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def _liveness_health(diag: dict) -> dict:
+        """What is actually running, from the daemon's capabilities.
+
+        The daemon only fills this in when the worker answered, so an
+        empty dict means "not known" -- reported as unknown, never as
+        healthy.
+        """
+        live = diag.get("liveness")
+        if not isinstance(live, dict):
+            return {"ok": True, "summary": "", "detail": ""}
+        marks_ok = bool(live.get("landmarks_ok"))
+        anti_ok = bool(live.get("antispoof"))
+        if marks_ok and anti_ok:
+            return {"ok": True, "summary": "", "detail": ""}
+        lost = []
+        if not marks_ok:
+            lost.append("blink / 3D / attention")
+        if not anti_ok:
+            lost.append("ML anti-spoof")
+        summary = "Liveness reduced: no " + ", no ".join(lost)
+        detail = ("Face unlock still works, but these checks are NOT "
+                  "running: " + ", ".join(lost) + ".")
+        if not marks_ok:
+            detail += (" Heavy strictness cannot be satisfied until the "
+                       "landmark model is installed (sudo faceid-nim "
+                       "fetch-models).")
+        return {"ok": False, "summary": summary, "detail": detail}
 
     # ---- opening animation UI ----------------------------------------
     def _opening_page(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
 
+        anim = Adw.PreferencesGroup(
+            title="Animations",
+            description="Turn the lock-screen motion off to show results "
+                        "instantly, without sweeps or springs. Applies at "
+                        "the very next scan — no reload, no restart.")
+        self.sw_animations = Adw.SwitchRow(
+            title="Play animations",
+            subtitle="Off shows Verified / Not recognized immediately")
+        self.sw_animations.set_active(
+            bool(self._prefs.get("animations_enabled", True)))
+        self.sw_animations.connect("notify::active",
+                                   self.on_animations_changed)
+        anim.add(self.sw_animations)
+        page.add(anim)
+
         sel = Adw.PreferencesGroup(
             title="Opening animation",
-            description="Plays while the lock-screen pill grows at the "
-                        "start of a scan. The choice applies at the very "
-                        "next lock — no extension reload, no restart.")
+            description="Glance video pill is the default — a spring pill "
+                        "with unlock videos (linux-anim). The choice applies "
+                        "at the very next lock — no extension reload, no restart.")
         self.cb_opening = Adw.ComboRow(
             title="Active animation",
             subtitle="Pick how the lock screen begins",
             model=Gtk.StringList.new([]))
-        self.cb_opening.connect("notify::selected", self.on_opening_selected)
+        self._opening_notify_id = self.cb_opening.connect(
+            "notify::selected", self.on_opening_selected)
         sel.add(self.cb_opening)
 
         prev = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
@@ -801,25 +995,33 @@ class Window(Adw.ApplicationWindow):
                         "the look.")
         self.cb_scan_face = Adw.ComboRow(
             title="Scan face",
-            subtitle="Arena (premium halo/crest) or the classic sweep",
-            model=Gtk.StringList.new(["Arena (default)", "Classic"]))
-        self.cb_scan_face.connect("notify::selected",
-                                  self.on_scan_face_selected)
+            subtitle="Smile (face outline, default), Orbit (halo/crest) or Classic",
+            model=Gtk.StringList.new(["Smile (default)", "Orbit", "Classic"]))
+        self._scanface_notify_id = self.cb_scan_face.connect(
+            "notify::selected", self.on_scan_face_selected)
         faceg.add(self.cb_scan_face)
         page.add(faceg)
 
         pvgroup = Adw.PreferencesGroup(
             title="Preview",
-            description="Watch the full Verified → Welcome sequence on the "
-                        "lock pill right now. No camera and no "
-                        "authentication — a developer preview only, so you "
-                        "can tune the animation without standing at the "
-                        "screen.")
+            description="Glance video pill is the default opening. Watch it "
+                        "here (separate test window), or play the lock-pill "
+                        "Verified → Welcome sequence on the real pill. Both "
+                        "are previews only — no camera, no authentication.")
+        vrow = Adw.ActionRow(
+            title="Preview video pill (default)",
+            subtitle="Glance-style spring pill with unlock videos "
+                     "(linux-anim test window)")
+        vb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
+        vb.add_css_class("suggested-action")
+        vb.connect("clicked", self._preview_video_pill)
+        vrow.add_suffix(vb)
+        pvgroup.add(vrow)
         prow = Adw.ActionRow(
             title="Preview success animation",
-            subtitle="Ring sweep, check, Verified, Welcome, identity")
+            subtitle="Ring sweep, check, Verified, Welcome, identity "
+                     "on the lock pill")
         pb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
-        pb.add_css_class("suggested-action")
         pb.connect("clicked", self._preview_success)
         prow.add_suffix(pb)
         pvgroup.add(prow)
@@ -889,7 +1091,11 @@ class Window(Adw.ApplicationWindow):
         return " · ".join(parts)
 
     def on_scan_face_selected(self, row, _param=None):
-        face = "classic" if row.get_selected() == 1 else "arena"
+        if self._suspend_changes:
+            return
+        sel = row.get_selected()
+        face = ["apple", "arena", "classic"][min(sel, 2)] \
+            if sel != Gtk.INVALID_LIST_POSITION else "apple"
         self._openings["scan_face"] = face
         openings.save(self._openings)
         logging.getLogger("faceid_app").info("scan face set to %s", face)
@@ -898,21 +1104,31 @@ class Window(Adw.ApplicationWindow):
         cfg = self._openings
         ids = openings.all_ids(cfg)
 
+        # Rebuilding the ComboRow model from inside its own
+        # notify::selected emission re-triggers the emission at native
+        # level (infinite loop -> hang / segfault). Block both row
+        # handlers for the whole rebuild so programmatic changes are
+        # never observed; the suspend flag stays as a second guard.
         self._suspend_changes = True
-        self.cb_scan_face.set_selected(
-            1 if cfg.get("scan_face", "arena") == "classic" else 0)
-        names = []
-        for vid in ids:
-            s = openings.spec(cfg, vid) or {}
-            parts = [s.get("name") or vid]
-            if s.get("kind") == "builtin":
-                parts.append("(built-in)")
-            names.append(" ".join(parts))
-        self.cb_opening.set_model(Gtk.StringList.new(names))
-        active = cfg.get("active") or "logo"
-        if active in ids:
-            self.cb_opening.set_selected(ids.index(active))
-        self._suspend_changes = False
+        self._block_opening_signals(True)
+        try:
+            _face_idx = {"apple": 0, "arena": 1, "classic": 2}
+            self.cb_scan_face.set_selected(
+                _face_idx.get(cfg.get("scan_face", "apple"), 0))
+            names = []
+            for vid in ids:
+                s = openings.spec(cfg, vid) or {}
+                parts = [s.get("name") or vid]
+                if s.get("kind") == "builtin":
+                    parts.append("(built-in)")
+                names.append(" ".join(parts))
+            self.cb_opening.set_model(Gtk.StringList.new(names))
+            active = cfg.get("active") or "glance"
+            if active in ids:
+                self.cb_opening.set_selected(ids.index(active))
+        finally:
+            self._block_opening_signals(False)
+            self._suspend_changes = False
 
         s = openings.spec(cfg, active) or {}
         desc = s.get("description") or ""
@@ -950,9 +1166,47 @@ class Window(Adw.ApplicationWindow):
             self.opening_group.add(r)
             self._opening_rows.append(r)
 
+    def _block_opening_signals(self, block: bool) -> None:
+        """Block/unblock the opening + scan-face row handlers (native,
+        via handler ids). Used while rebuilding row models so a
+        programmatic set_model/set_selected can never re-enter the
+        selection handlers and loop the notify emission."""
+        for row, hid in ((getattr(self, "cb_opening", None),
+                          getattr(self, "_opening_notify_id", 0)),
+                         (getattr(self, "cb_scan_face", None),
+                          getattr(self, "_scanface_notify_id", 0))):
+            try:
+                if row is not None and hid:
+                    if block:
+                        row.handler_block(hid)
+                    else:
+                        row.handler_unblock(hid)
+            except Exception:
+                pass
+
+    def _schedule_openings_refresh(self) -> None:
+        """Defer a full openings refresh past the current signal
+        emission. Rebuilding the ComboRow model synchronously inside
+        its own notify::selected hangs/crashes the app; one idle
+        callback (coalesced) avoids the re-entrancy entirely."""
+        if self._refresh_openings_pending:
+            return
+        self._refresh_openings_pending = True
+
+        def _later() -> bool:
+            self._refresh_openings_pending = False
+            try:
+                self._refresh_openings()
+            except Exception:
+                logging.getLogger("faceid_app").exception(
+                    "openings refresh failed")
+            return False
+
+        GLib.idle_add(_later)
+
     def _draw_opening_preview(self, area, cr, w, h, _data) -> None:
         s = openings.spec(self._openings,
-                          self._openings.get("active") or "logo") or {}
+                          self._openings.get("active") or "glance") or {}
         bg = _rgba_tuple(s.get("bg") or "rgba(14, 18, 26, 0.82)")
         accent = _rgba_tuple(s.get("accent") or "#a5d8ff")
         cr.scale(w, h)
@@ -973,6 +1227,15 @@ class Window(Adw.ApplicationWindow):
             cr.arc(0.36, 0.5, 0.22, 0, 2 * math.pi)
             cr.set_line_width(0.03)
             cr.stroke()
+        elif (self._openings.get("active") or "glance") == "glance":
+            # Default video-pill hint: halo + centre dot (spring pill
+            # with unlock videos — see Preview video pill).
+            cr.set_source_rgba(*accent)
+            cr.arc(0.36, 0.5, 0.22, 0, 2 * math.pi)
+            cr.set_line_width(0.03)
+            cr.stroke()
+            cr.arc(0.36, 0.5, 0.10, 0, 2 * math.pi)
+            cr.fill()
         else:
             cr.set_source_rgba(*accent)
             cr.arc(0.36, 0.5, 0.12, 0, 2 * math.pi)
@@ -986,8 +1249,14 @@ class Window(Adw.ApplicationWindow):
         if 0 <= idx < len(ids):
             vid = ids[idx]
             if openings.set_active(self._openings, vid):
-                self._refresh_openings()
+                # Cheap bits now (no signals involved); the model
+                # rebuild is deferred past this emission — doing it
+                # here re-enters notify::selected and wedges the app.
                 s = openings.spec(self._openings, vid) or {}
+                desc = s.get("description") or ""
+                self.preview_label.set_text(desc)
+                self.preview_area.queue_draw()
+                self._schedule_openings_refresh()
                 self.toast(f"Opening animation: {s.get('name') or vid} "
                            "(next lock)")
 
@@ -1014,6 +1283,41 @@ class Window(Adw.ApplicationWindow):
                 self.toast("Success animation previewing now")
             else:
                 self.toast("Preview unavailable — is the daemon up to date?")
+
+        self._thread(run, then)
+
+    def _preview_video_pill(self, _b=None) -> None:
+        """Launch linux-anim/test_anim.py as a detached preview window.
+
+        Standalone subprocess on purpose: the harness owns its own
+        Gtk.Application + LayerShell window, so a crash or missing
+        codec can never take the settings app down with it.
+        """
+        harness = _find_video_pill_harness()
+        if not harness:
+            self.toast("Video-pill harness not found (linux-anim/)")
+            logging.getLogger("faceid_app").warning(
+                "video pill preview: harness missing")
+            return
+
+        def run():
+            import subprocess as _sp
+            try:
+                _sp.Popen(
+                    [sys.executable, harness],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    start_new_session=True)
+                return None
+            except Exception as e:
+                return str(e)
+
+        def then(res):
+            if res is None:
+                self.toast("Video-pill preview opening…")
+            else:
+                self.toast("Could not launch preview")
+                logging.getLogger("faceid_app").warning(
+                    "video pill preview failed: %s", res)
 
         self._thread(run, then)
 
@@ -1379,12 +1683,28 @@ class Window(Adw.ApplicationWindow):
     def on_camera_mode_changed(self, *_a) -> None:
         if self._suspend_changes:
             return
-        mode = CAMERA_MODE_VALUES[self.cb_camera_mode.get_selected()]
+        sel = self.cb_camera_mode.get_selected()
+        if sel == Gtk.INVALID_LIST_POSITION:
+            return
+        mode = CAMERA_MODE_VALUES[min(sel, len(CAMERA_MODE_VALUES) - 1)]
         self._prefs["camera_mode"] = mode
         prefs.save(self._prefs)
         self._push_plan(camera_discovery.resolve_plan(self._prefs,
                                                       self._discovery))
         logging.getLogger("faceid_app").info("camera mode set to %s", mode)
+
+    def _set_settings_async(self, settings: dict, on_success) -> None:
+        def finished(error):
+            if error:
+                self.toast(str(error))
+                return
+            self._settings_cache = dict(settings)
+            on_success()
+
+        try:
+            self.daemon.set_settings_async(settings, finished)
+        except DaemonError as e:
+            self.toast(str(e))
 
     def _push_plan(self, plan: dict) -> None:
         s = dict(self._settings_cache or {})
@@ -1392,12 +1712,8 @@ class Window(Adw.ApplicationWindow):
             return
         s["mode"] = plan["mode"]
         s["camera"] = plan["camera"] or ""
-        s["ir_camera"] = plan["ir_camera"]
-        try:
-            self.daemon.set_settings(s)
-            self._settings_cache = s
-        except DaemonError as e:
-            self.toast(str(e))
+        s["ir_camera"] = plan["ir_camera"] or ""
+        self._set_settings_async(s, lambda: None)
         self._update_camera_ui(plan)
 
     def _update_camera_ui(self, plan: dict) -> None:
@@ -1417,14 +1733,37 @@ class Window(Adw.ApplicationWindow):
         self.rgb_det_row.set_subtitle(rgb_lab)
         self.ir_det_row.set_subtitle(ir_lab)
 
-        used = f"{'IR' if mode == 'ir' else 'RGB'} camera"
-        used_path = plan.get("ir_camera") if mode == "ir" else plan.get("camera")
+        if mode == "ir":
+            used, used_path = "IR camera", plan.get("ir_camera")
+        elif mode == "hybrid":
+            used = "Hybrid (RGB+IR)"
+            cam = plan.get("camera") or ""
+            iir = plan.get("ir_camera") or ""
+            used_path = f"{cam} + {iir}".strip(" +")
+        elif mode == "auto":
+            used = "Automatic (light-picks RGB/IR)"
+            cam = plan.get("camera") or ""
+            iir = plan.get("ir_camera") or ""
+            used_path = f"{cam} + {iir}".strip(" +")
+        else:
+            used, used_path = "RGB camera", plan.get("camera")
         if used_path:
             subtitle = f"{used} · {used_path}"
         else:
             subtitle = f"{used} · none available"
         prefix = "Automatic: " if want == "auto" else ""
         self.cb_camera_mode.set_subtitle(prefix + subtitle)
+
+        # Room-light readout: best-effort cv2 sample on the RGB device.
+        # Never crashes the UI: busy/missing device -> "unknown".
+        try:
+            luma = camera_discovery.sample_light(plan.get("camera"))
+            self.light_row.set_subtitle(camera_discovery.light_label(luma))
+        except Exception:
+            try:
+                self.light_row.set_subtitle("Room light: unknown")
+            except Exception:
+                pass
 
         self._update_camera_page(plan)
 
@@ -1438,6 +1777,7 @@ class Window(Adw.ApplicationWindow):
         self.cam_chip.set_text(" · ".join(parts))
 
     def _update_camera_page(self, plan: dict) -> None:
+        self._clear(self.cam_group, self._cam_rows)
         for cam in plan.get("cameras", []):
             w, h = cam.max_resolution
             res = f"{w}x{h}" if w else "n/a"
@@ -1479,6 +1819,16 @@ class Window(Adw.ApplicationWindow):
             return "yes"
         if v is False:
             return "no"
+        if isinstance(v, dict):
+            # The daemon nests liveness/accel/worker detail. Render the
+            # fields a person acts on; never dump a raw dict repr into a
+            # settings row.
+            return "; ".join(
+                f"{k}={val}" for k, val in v.items()
+                if val not in (None, "", [], False) or k.endswith("_ok")
+            ) or "unknown"
+        if isinstance(v, list):
+            return ", ".join(str(x) for x in v) if v else "none"
         return str(v)
 
     def _on_camera_edited(self, _row, _pspec) -> None:
@@ -1507,18 +1857,183 @@ class Window(Adw.ApplicationWindow):
         if s is None:
             return
         s = dict(s)
+        was_enabled = bool(s.get("enabled"))
         s["enabled"] = self.sw_enabled.get_active()
-        strict = ["off", "light", "heavy"][self.cb_strict.get_selected()]
+        sel = self.cb_strict.get_selected()
+        if sel == Gtk.INVALID_LIST_POSITION:
+            sel = 1
+        strict = ["off", "light", "heavy"][min(sel, 2)]
         s["strictness"] = strict
         s["scan_timeout_ms"] = int(self.sp_timeout.get_value())
         s["require_attention"] = self.sw_attention.get_active()
+        s["timeline_enabled"] = self.sw_timeline.get_active()
         self._update_strict_note(strict)
-        try:
-            self.daemon.set_settings(s)
-            self._settings_cache = s
+
+        def saved():
             self.refresh_status_only()
+
+        if s["enabled"] != was_enabled:
+            def pam_saved(error):
+                if error:
+                    self.toast(str(error))
+                    return
+                self._set_settings_async(s, saved)
+            try:
+                self.daemon.set_pam_enabled_async(s["enabled"], pam_saved)
+            except DaemonError as e:
+                self.toast(str(e))
+        else:
+            self._set_settings_async(s, saved)
+
+    def on_speak_changed(self, *_a) -> None:
+        if self._suspend_changes:
+            return
+        self._prefs["speak_greeting"] = bool(self.sw_speak.get_active())
+        prefs.save(self._prefs)
+        self.toast("Greeting speech on" if self._prefs["speak_greeting"]
+                   else "Greeting speech off")
+
+    def on_animations_changed(self, *_a) -> None:
+        if self._suspend_changes:
+            return
+        self._prefs["animations_enabled"] = bool(
+            self.sw_animations.get_active())
+        prefs.save(self._prefs)
+        self.toast("Animations on" if self._prefs["animations_enabled"]
+                   else "Animations off")
+
+    def _on_greeting_edited(self, _row, _pspec=None) -> None:
+        if getattr(self, "_suspend_changes", False):
+            return
+        if getattr(self, "_greeting_timer", 0):
+            try:
+                GLib.source_remove(self._greeting_timer)
+            except Exception:
+                pass
+        self._greeting_timer = GLib.timeout_add(600, self._apply_greeting)
+
+    def _apply_greeting(self) -> bool:
+        self._greeting_timer = 0
+        try:
+            text = self.greeting_entry.get_text().strip()[:120] or "Welcome {name}"
+            voice = self.greeting_voice_entry.get_text().strip()[:48]
+            rate = int(self.sp_greeting_rate.get_value())
+            rate = max(-100, min(100, rate))
+        except Exception:
+            return GLib.SOURCE_REMOVE
+        self._prefs["greeting_text"] = text
+        self._prefs["greeting_voice"] = voice
+        self._prefs["greeting_rate"] = rate
+        prefs.save(self._prefs)
+        return GLib.SOURCE_REMOVE
+
+    def _test_greeting(self) -> None:
+        import shutil as _shutil
+        import subprocess as _sp
+        # Render with a sample name so {name} can be heard.
+        template = self._prefs.get("greeting_text", "Welcome {name}")
+        try:
+            sample = "Zang"
+            for _n, _e, _m in (self.daemon.list_identities() or []):
+                if _e:
+                    sample = _n
+                    break
+        except Exception:
+            sample = "Zang"
+        try:
+            text = str(template or "Welcome {name}").replace("{name}", sample)[:160]
+        except Exception:
+            text = f"Welcome {sample}"
+        if not text.strip():
+            text = f"Welcome {sample}"
+        voice = str(self._prefs.get("greeting_voice", "") or "").strip()[:48]
+        try:
+            rate = max(-100, min(100, int(self.sp_greeting_rate.get_value())))
+        except Exception:
+            rate = 0
+        # Prefer spd-say (speech-dispatcher, calmest default), then
+        # natural-soft espeak-ng settings. Never blocks the UI.
+        def _run():
+            try:
+                if _shutil.which("spd-say"):
+                    argv = ["spd-say"]
+                    if voice:
+                        argv += ["-v", voice]
+                    if rate:
+                        argv += ["-r", str(rate)]
+                    argv += [text]
+                    _sp.Popen(argv, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                    return "Speaking…"
+                if _shutil.which("espeak-ng"):
+                    argv = ["espeak-ng", "-s", "150", "-a", "80"]
+                    if voice:
+                        argv += ["-v", voice]
+                    argv += [text]
+                    _sp.Popen(argv, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                    return "Speaking…"
+                return "No speech engine found (install speech-dispatcher)"
+            except Exception as e:
+                return f"Could not speak: {e}"
+        self._thread(_run, self.toast)
+
+    def _show_timeline(self) -> None:
+        def finished(items, error):
+            if error:
+                self.toast(str(error))
+                return
+            import json as _json
+            body = _json.dumps(items[-20:], indent=2) if items else "[]"
+            dlg = Adw.AlertDialog(
+                heading=f"Lock/unlock timeline ({len(items)} events)",
+                body="JSON, newest last. Sudo and command history are never "
+                     "stored here.\n\n" + body[:2000])
+            dlg.add_response("ok", "Close")
+            dlg.present(self)
+
+        try:
+            self.daemon.get_timeline_async(finished)
         except DaemonError as e:
             self.toast(str(e))
+
+    def _auto_tune(self) -> None:
+        """Universal hardware-aware tune: works RGB-only or with IR."""
+        import os as _os
+        import subprocess as _sp
+        import json as _json
+        candidates = [
+            "/usr/share/faceid-nim/app/faceid_app/auto_tune.py",
+            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                           "auto_tune.py"),
+        ]
+        script = next((c for c in candidates if _os.path.exists(c)), candidates[0])
+        try:
+            out = _sp.run(
+                ["python3", script],
+                capture_output=True, text=True, timeout=30)
+            text = (out.stdout or "").strip() or (out.stderr or "").strip()
+        except Exception as e:
+            self.toast(f"Auto-tune failed: {e}")
+            return
+        try:
+            sug = _json.loads(text[text.index("{"):text.rindex("}") + 1])
+        except Exception:
+            self.toast(text[:200] if text else "Auto-tune produced no output")
+            return
+        # Apply universal suggestion: camera_mode follows hardware,
+        # tau/vote follow measurement-or-default (never weakens silently).
+        if sug.get("camera_mode") in CAMERA_MODE_VALUES:
+            self._prefs["camera_mode"] = sug["camera_mode"]
+            prefs.save(self._prefs)
+        s = dict(self._settings_cache or {})
+        for k in ("tau", "vote_k", "vote_n", "strictness", "mode"):
+            if sug.get(k) is not None:
+                s[k] = sug[k]
+
+        def applied():
+            self.toast(f"Auto-tune: {sug.get('summary', 'applied')}")
+            self.refresh_status_only()
+
+        self._set_settings_async(s, applied)
 
     def refresh_status_only(self) -> None:
         try:
@@ -1579,11 +2094,16 @@ class Window(Adw.ApplicationWindow):
                 used = ""
                 plan = self._plan
                 if plan:
-                    used = (f"IR camera · {plan.get('ir_camera')}"
-                            if plan.get("mode") == "ir" and plan.get("ir_camera")
-                            else f"RGB camera · {plan.get('camera')}"
-                            if plan.get("mode") == "rgb" and plan.get("camera")
-                            else "no usable camera yet")
+                    if (plan.get("mode") == "hybrid"
+                            and plan.get("camera") and plan.get("ir_camera")):
+                        used = (f"Hybrid (RGB+IR) · {plan.get('camera')} + "
+                                f"{plan.get('ir_camera')}")
+                    elif (plan.get("mode") == "ir" and plan.get("ir_camera")):
+                        used = f"IR camera · {plan.get('ir_camera')}"
+                    elif (plan.get("mode") == "rgb" and plan.get("camera")):
+                        used = f"RGB camera · {plan.get('camera')}"
+                    else:
+                        used = "no usable camera yet"
                 win = OnboardingWindow(self, self.daemon, identity=name,
                                        on_done=self.refresh,
                                        camera_summary=used)
@@ -1623,7 +2143,7 @@ class Window(Adw.ApplicationWindow):
         else:
             summary = camera_discovery.summary(
                 (self._plan or {}).get("rgb_info")
-                if (self._plan or {}).get("mode") == "rgb"
+                if (self._plan or {}).get("mode") in ("rgb", "hybrid")
                 else (self._plan or {}).get("ir_info")
                 or (self._plan or {}).get("rgb_info"))
         try:
@@ -1634,16 +2154,27 @@ class Window(Adw.ApplicationWindow):
         win.present()
 
     def _toggle(self, name: str, enabled: bool) -> None:
+        def finished(error):
+            if error:
+                self.toast(str(error))
+                self.refresh()
+
         try:
-            self.daemon.set_identity_enabled(name, enabled)
+            self.daemon.set_identity_enabled_async(name, enabled, finished)
         except DaemonError as e:
             self.toast(str(e))
+            self.refresh()
 
     def _delete(self, name: str) -> None:
-        try:
-            self.daemon.delete_identity(name)
+        def finished(error):
+            if error:
+                self.toast(str(error))
+                return
             self.toast(f"Deleted {name}")
             self.refresh()
+
+        try:
+            self.daemon.delete_identity_async(name, finished)
         except DaemonError as e:
             self.toast(str(e))
 
@@ -1659,10 +2190,15 @@ class Window(Adw.ApplicationWindow):
         dlg.present(self)
 
     def _wipe(self) -> None:
-        try:
-            self.daemon.delete_all_data()
+        def finished(error):
+            if error:
+                self.toast(str(error))
+                return
             self.toast("All face data removed")
             self.refresh()
+
+        try:
+            self.daemon.delete_all_data_async(finished)
         except DaemonError as e:
             self.toast(str(e))
 

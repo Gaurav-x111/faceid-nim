@@ -25,7 +25,6 @@ const IFACE = `
       <arg type="s" direction="out"/>
     </method>
     <method name="PreviewAnimation"><arg type="s" direction="in"/></method>
-    <method name="Retry"/>
   </interface>
 </node>`;
 
@@ -50,6 +49,7 @@ export class DaemonClient {
     }
 
     _appeared() {
+        this._disconnectProxy();
         try {
             this._proxy = new Proxy(
                 Gio.DBus.system,
@@ -75,20 +75,10 @@ export class DaemonClient {
         this._onState?.('idle', 0, '');
     }
 
-    // Hover-to-retry. Daemons that export Retry get a real rescan;
-    // everything else falls back to TestScan, which exercises the same
-    // camera path, and never throws out of the hover handler.
+    // Hover-to-retry: the daemon has no Retry method, so a hover
+    // simply re-exercises the same camera path via TestScan.
+    // Never throws out of the hover handler.
     retry() {
-        if (!this._proxy)
-            return Promise.resolve(false);
-        if (typeof this._proxy.Retry === 'function') {
-            try {
-                return this._proxy.Retry().then(() => true,
-                    () => this.testScan().then(() => true, () => false));
-            } catch (e) {
-                logError(e, 'faceid@nim: Retry');
-            }
-        }
         return this.testScan().then(() => true, () => false);
     }
 

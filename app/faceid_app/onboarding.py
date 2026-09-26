@@ -31,6 +31,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
 from .dbus_client import Daemon, DaemonError, Enrollment  # noqa: E402
+from . import prefs  # noqa: E402
 
 # Status strings from daemon/src/enroll.rs. Kept as constants so a
 # rename on either side shows up as a NameError, not a silent no-op.
@@ -724,7 +725,7 @@ class OnboardingWindow(Adw.Window):
 
         ok = bool(diag.get("worker_reachable"))
         for key, value in diag.items():
-            row = Adw.ActionRow(title=str(key).replace("_", " "),
+            row = Adw.ActionRow(title=prefs.diag_title(key),
                                 subtitle=self._friendly_diag(key, value))
             self.camera_list.append(row)
 

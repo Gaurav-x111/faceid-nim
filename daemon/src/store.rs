@@ -33,19 +33,46 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroize;
 
 const MAGIC: &[u8; 4] = b"FIDN";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+const VERSION_V1: u8 = 1;
 const NONCE_LEN: usize = 12;
 const MAX_DIM: usize = 2048;
 const MAX_COUNT: usize = 64;
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Per-template recognition spectrum tags (store v2).
+pub const SPECTRUM_RGB: u8 = 0;
+pub const SPECTRUM_IR: u8 = 1;
+pub const SPECTRUM_ANY: u8 = 2;
 
 pub struct Identity {
     pub name: String,
     pub model_id: String,
     pub enabled: bool,
     pub templates: Vec<Vec<f32>>,
+    /// Parallel to `templates`: SPECTRUM_RGB/IR/ANY per template.
+    /// Legacy (v1) files load with all tags ANY (exact legacy behaviour).
+    pub spectra: Vec<u8>,
+}
+
+impl Identity {
+    /// Spectrum tag for template `ix` (ANY when unknown/missing).
+    pub fn spectrum_at(&self, ix: usize) -> u8 {
+        self.spectra.get(ix).copied().unwrap_or(SPECTRUM_ANY)
+    }
+}
+
+/// Map a worker `ev_done.spectrum` string to a tag. "" (legacy) matches all.
+pub fn spectrum_tag(s: &str) -> u8 {
+    match s {
+        "rgb" => SPECTRUM_RGB,
+        "ir" => SPECTRUM_IR,
+        _ => SPECTRUM_ANY,
+    }
 }
 
 pub struct Store {
@@ -109,8 +136,8 @@ impl Store {
         Ok(self.user_dir(uid).join(format!("{name}.tpl")))
     }
 
-    fn aad(uid: u32, name: &str, model_id: &str) -> Vec<u8> {
-        format!("{uid}|{name}|{model_id}|{VERSION}").into_bytes()
+    fn aad(uid: u32, name: &str, model_id: &str, version: u8) -> Vec<u8> {
+        format!("{uid}|{name}|{model_id}|{version}").into_bytes()
     }
 
     pub fn save(&self, uid: u32, ident: &Identity) -> Result<()> {
@@ -128,18 +155,31 @@ impl Store {
             bail!("inconsistent embedding dimensions");
         }
 
-        let mut plain = Vec::with_capacity(dim * ident.templates.len() * 4 + 1);
+        // v2 always: spectra tags appended after the floats. Callers that
+        // did not set spectra (or set a short vec) get ANY (legacy match).
+        let mut spectra = ident.spectra.clone();
+        if spectra.len() != ident.templates.len() {
+            spectra = vec![SPECTRUM_ANY; ident.templates.len()];
+        }
+        for s in &mut spectra {
+            if *s != SPECTRUM_RGB && *s != SPECTRUM_IR {
+                *s = SPECTRUM_ANY;
+            }
+        }
+        let mut plain =
+            Vec::with_capacity(1 + dim * ident.templates.len() * 4 + ident.templates.len());
         plain.push(u8::from(ident.enabled));
         for t in &ident.templates {
             for v in t {
                 plain.extend_from_slice(&v.to_le_bytes());
             }
         }
+        plain.extend_from_slice(&spectra);
 
         let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|e| anyhow!("{e}"))?;
         let mut nonce_bytes = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let aad = Self::aad(uid, &ident.name, &ident.model_id);
+        let aad = Self::aad(uid, &ident.name, &ident.model_id, VERSION);
         let ct = cipher
             .encrypt(
                 Nonce::from_slice(&nonce_bytes),
@@ -169,19 +209,26 @@ impl Store {
         fs::create_dir_all(&dir)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         let final_path = self.path(uid, &ident.name)?;
-        let tmp = final_path.with_extension("tpl.tmp");
-        {
+        let tmp = final_path.with_extension(format!(
+            "tpl.tmp.{}.{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| -> Result<()> {
             let mut f = fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
                 .open(&tmp)?;
             f.write_all(&out)?;
             f.sync_all()?;
+            fs::rename(&tmp, &final_path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
-        fs::rename(&tmp, &final_path)?;
-        Ok(())
+        result
     }
 
     pub fn load(&self, uid: u32, name: &str) -> Result<Identity> {
@@ -193,8 +240,9 @@ impl Store {
         if &raw[0..4] != MAGIC {
             bail!("not a faceid template");
         }
-        if raw[4] != VERSION {
-            bail!("unsupported template version {}", raw[4]);
+        let file_version = raw[4];
+        if file_version != VERSION && file_version != VERSION_V1 {
+            bail!("unsupported template version {}", file_version);
         }
 
         let mut off = 5usize;
@@ -216,7 +264,7 @@ impl Store {
         off += NONCE_LEN;
 
         let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|e| anyhow!("{e}"))?;
-        let aad = Self::aad(uid, name, &model_id);
+        let aad = Self::aad(uid, name, &model_id, file_version);
         let mut plain = cipher
             .decrypt(
                 Nonce::from_slice(nonce),
@@ -228,11 +276,17 @@ impl Store {
             .map_err(|_| {
                 anyhow!(
                     "template authentication failed \
-                                  (tampered, wrong user, or wrong key)"
+                                   (tampered, wrong user, or wrong key)"
                 )
             })?;
 
-        if plain.len() != 1 + dim * count * 4 {
+        // v1 body: 1 + dim*count*4. v2 body: + count spectrum bytes.
+        let expect = if file_version == VERSION_V1 {
+            1 + dim * count * 4
+        } else {
+            1 + dim * count * 4 + count
+        };
+        if plain.len() != expect {
             bail!("template body length mismatch");
         }
         let enabled = plain[0] != 0;
@@ -251,12 +305,26 @@ impl Store {
             }
             templates.push(v);
         }
+        let spectra = if file_version == VERSION_V1 {
+            // Legacy files behave EXACTLY as today: match-all.
+            vec![SPECTRUM_ANY; count]
+        } else {
+            let off = 1 + dim * count * 4;
+            plain[off..off + count]
+                .iter()
+                .map(|b| match b {
+                    x if *x == SPECTRUM_RGB || *x == SPECTRUM_IR => *x,
+                    _ => SPECTRUM_ANY,
+                })
+                .collect()
+        };
         plain.zeroize();
         Ok(Identity {
             name: name.to_string(),
             model_id,
             enabled,
             templates,
+            spectra,
         })
     }
 
@@ -329,6 +397,7 @@ mod tests {
             model_id: "sface_v1".into(),
             enabled: true,
             templates: vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]],
+            spectra: vec![SPECTRUM_ANY, SPECTRUM_ANY],
         }
     }
 
@@ -341,6 +410,25 @@ mod tests {
         assert_eq!(back.templates.len(), 2);
         assert!((back.templates[1][2] - 0.6).abs() < 1e-6);
         assert_eq!(s.list(1000), vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn v2_roundtrips_spectrum_tags() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        let id = Identity {
+            name: "dual".into(),
+            model_id: "sface_v1".into(),
+            enabled: true,
+            templates: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+            spectra: vec![SPECTRUM_RGB, SPECTRUM_IR],
+        };
+        s.save(1000, &id).unwrap();
+        let back = s.load(1000, "dual").unwrap();
+        assert_eq!(back.spectra, vec![SPECTRUM_RGB, SPECTRUM_IR]);
+        // Header version byte is 2.
+        let raw = fs::read(d.path().join("users/1000/dual.tpl")).unwrap();
+        assert_eq!(raw[4], VERSION);
     }
 
     #[test]

@@ -1,3 +1,134 @@
+faceid-nim (1.1.1-1) jammy; urgency=medium
+
+  * Universal install fixes: Architecture amd64 -> any (CI already built
+    arm64, install.sh already accepted it); release.yml now builds amd64
+    AND arm64 on Ubuntu 22.04 so one artifact installs on 22.04 and newer
+    instead of noble-only; install.sh version pin moved to a single
+    PKG_VERSION (1.1.1-1) with leading-v stripping so tags (v1.1.1) and
+    deb versions (1.1.1-1) both resolve; Maintainer set to the real
+    upstream address with Vcs-Git/Vcs-Browser for Launchpad/PPA.
+
+ -- Gaurav-x111 <gauravshah0777@gmail.com>  Sat, 26 Sep 2026 17:00:00 +0545
+
+faceid-nim (1.1.0-1) noble; urgency=high
+
+  * FIX: the vision worker could not start at all. models.py had a
+    one-character syntax error ("license: str,") that made
+    build_engine() -- the function that constructs the whole worker --
+    unimportable. No test imported that module, so the suite stayed green
+    while nothing could run. vision/tests/test_imports.py now compiles and
+    imports every module, including a CI job that builds the packaged venv
+    exactly as debian/rules does and imports all of it.
+
+  * FIX: MediaPipe Face Mesh was never running. The worker asked for
+    mp.solutions.face_mesh, an API the installed wheel (0.10.x) no longer
+    ships, and the resulting AttributeError was swallowed into a silent
+    "unavailable". Blink, parallax, challenge-response and the attention
+    check were therefore inert no-ops in a shipped build, and
+    strictness = heavy could never be satisfied. landmarks.py is now a
+    backend registry that prefers the supported MediaPipe Tasks API, and
+    every failure carries a reason that reaches `faceid-nim status` and
+    the app instead of being swallowed.
+
+  * Dense landmarks are now provisioned automatically. face_landmarker.task
+    is pinned by SHA-256 in the manifest and fetched by fetch-models. The
+    manifest gains an `optional` key: absent is a degraded feature that is
+    reported, not a silent no-op. The detector and the recogniser stay
+    required, so a machine missing either still fails loudly.
+
+  * The passive ML anti-spoof model is still not fetchable (no published
+    ONNX export at a stable URL). It is now unpinned AND optional, so it
+    is refused rather than half-loaded, and every user-facing surface says
+    the check is unavailable instead of implying it runs.
+
+  * Installing the package now actually provisions it. postinst fetches
+    the models (non-fatal; a new faceid-nim-fetch-models.service retries
+    on every boot for a machine that was offline), detects the colour and
+    infrared cameras into the generated config, and prints the state it
+    achieved rather than a list of commands to type. postrm stops the
+    units and removes the generated GPU drop-in.
+
+  * `faceid-nim status` reports what is ACTUALLY running -- the live
+    landmark backend, the anti-spoof state, the execution provider and
+    thread count, the loaded model -- not just what is installed. The app
+    shows the same and warns when liveness is reduced.
+
+  * Inference is provisioned for the machine instead of hard-coded. A new
+    hardware probe (vision/faceid_vision/hardware.py) picks an execution
+    provider by constructing a real session and checking what came back --
+    onnxruntime downgrades to CPU with only a log line, so its provider
+    list is not evidence -- and sizes threads from the cgroup/affinity
+    limit rather than the host core count. A new gpu-devices script widens
+    the worker's systemd sandbox only when a GPU is actually present. The
+    recogniser and the anti-spoof model now share one session factory and
+    can no longer drift apart.
+
+  * arm64 is buildable. mediapipe publishes no arm64 wheel, which made the
+    liveness extra a hard build failure and therefore no package at all
+    for every ARM laptop. The extra is now best-effort per architecture,
+    with a venv import check after it, and the app reports the reduced
+    liveness honestly. CI builds the .deb for both amd64 and arm64.
+
+  * opencv is pinned below 5 and to the headless distribution; the
+    declared dependency was being satisfied by opencv-contrib-python,
+    which pulls GUI libraries into a headless system service.
+
+  * Camera discovery moved to vision/faceid_vision/cameras.py so
+    postinst, the CLI and the app all use one implementation, with the app
+    re-exporting it. Fresh installs get auto-detected cameras and
+    mode = "auto" (dark room -> IR, lit room -> RGB).
+
+  * packaging/scripts/install.sh picks the .deb matching
+    dpkg --print-architecture and refuses a mismatched package.
+
+  * Documentation corrections: polkit IS wired (architecture.md said it
+    was not), the worker socket path was wrong, matcher.rs's comment
+    claimed the best score reaches the audit log (it does not), and the
+    preview pipe framing description omitted its 'J'/'G' tag byte.
+    emitter_difference() is now explicitly documented as not wired into
+    any scan, and is unit-tested as a result.
+
+ -- Gaurav <gaurav@example.invalid>  Sat, 26 Sep 2026 16:30:00 +0540
+
+faceid-nim (1.0.2-1) noble; urgency=medium
+
+  * Package the settings-app launcher (/usr/bin/faceid-app) which the
+    desktop entry runs; a fresh install previously shipped no app
+    binary at all.
+  * Camera discovery: a mono-only capture node with real frame sizes is
+    a genuine IR sensor (combo RGB+IR webcams share one UVC card name);
+    it is no longer demoted to an RGB alternate, so IR and Hybrid modes
+    work on such machines.
+  * The app exposes the full camera-mode set again: Automatic, RGB,
+    IR and Hybrid (RGB + IR, daemon mode "both"). Hybrid falls back to
+    RGB with a note when no IR sensor exists.
+
+ -- Gaurav <gaurav@example.invalid>  Mon, 21 Sep 2026 22:30:00 +0545
+
+faceid-nim (1.0.1-1) noble; urgency=medium
+
+  * verify-models / fetch-models: unpinned manifest entries (the
+    optional MiniFASNet anti-spoof model has a placeholder hash by
+    design) are now treated as optional and skipped instead of failing.
+    A clean install no longer prints a false "models missing or
+    unverified" banner on machines that legitimately ship without that
+    model.
+
+ -- Gaurav <gaurav@example.invalid>  Mon, 21 Sep 2026 22:07:31 +0545
+
+faceid-nim (1.0.0-1) noble; urgency=medium
+
+  * First public release.
+  * Lock-screen animation rebuilt as a circular HUD (arena scanner)
+    with success and failure result cards; opening-animation and scan
+    style options now appear on the lock screen.
+  * Hybrid/IR liveness gated on real IR hardware; RGB-only machines
+    resolve to mode:rgb and never attempt IR analysis.
+  * Moire attack detection, camera sensor deduplication, scan audit
+    fields, opening-animations engine.
+
+ -- Gaurav <gaurav@example.invalid>  Mon, 21 Sep 2026 21:38:26 +0545
+
 faceid-nim (0.1.0-1) noble; urgency=low
 
   * Initial pre-alpha release.

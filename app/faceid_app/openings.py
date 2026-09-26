@@ -54,13 +54,19 @@ def variant_dir(variant_id: str) -> str:
 
 EASINGS = ["outCubic", "outBack", "outExpo"]
 
-# Which scan-face the unlock pill draws. "arena" is the default premium
-# scanner (halo + crest + dotted rings + beam + particles); "classic"
-# is the original ring/sweep/face pill.
-SCAN_FACES = ["arena", "classic"]
-DEFAULT_SCAN_FACE = "arena"
+# Which scan-face the unlock pill draws. "apple" is the default
+# smile-face scanner (thin track + progress arc + smiling face);
+# "arena" is the premium halo/crest scanner; "classic" is the original.
+SCAN_FACES = ["apple", "arena", "classic"]
+DEFAULT_SCAN_FACE = "apple"
 
 BUILTIN = {
+    "glance": {
+        "kind": "builtin",
+        "name": "Glance Video Pill",
+        "description": "Spring pill with unlock videos (linux-anim) — "
+                       "the default opening animation.",
+    },
     "logo": {
         "kind": "builtin",
         "name": "App Logo",
@@ -124,7 +130,7 @@ def _clean_spec(entry: dict) -> dict:
 # -- config -------------------------------------------------------------
 
 def default_config() -> dict:
-    return {"active": "logo", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
+    return {"active": "glance", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
 
 
 def load() -> dict:
@@ -141,8 +147,8 @@ def load() -> dict:
             k: _clean_spec(v) for k, v in variants.items()
             if isinstance(v, dict)
         }
-        active = str(data.get("active", "logo"))
-        cfg["active"] = active if active in all_ids(cfg) else "logo"
+        active = str(data.get("active", "glance"))
+        cfg["active"] = active if active in all_ids(cfg) else "glance"
         face = str(data.get("scan_face", DEFAULT_SCAN_FACE))
         cfg["scan_face"] = face if face in SCAN_FACES else DEFAULT_SCAN_FACE
     except (OSError, ValueError):
@@ -187,7 +193,7 @@ def set_active(cfg: dict, variant_id: str) -> bool:
 
 
 def set_scan_face(cfg: dict, face: str = DEFAULT_SCAN_FACE) -> bool:
-    """Pick the pill's scan-face style ('arena' | 'classic')."""
+    """Pick the pill's scan-face style ('apple' | 'arena' | 'classic')."""
     if face not in SCAN_FACES:
         return False
     cfg["scan_face"] = face
@@ -200,7 +206,7 @@ def remove_variant(cfg: dict, variant_id: str) -> bool:
         return False
     del cfg["variants"][variant_id]
     if cfg.get("active") == variant_id:
-        cfg["active"] = "logo"
+        cfg["active"] = "glance"
     save(cfg)
     shutil.rmtree(variant_dir(variant_id), ignore_errors=True)
     return True
@@ -353,6 +359,9 @@ def install_package(package_path: str) -> str:
     except (KeyError, ValueError):
         z.close()
         raise ValueError("Package has no readable opening.json") from None
+    if not isinstance(meta, dict):
+        z.close()
+        raise ValueError("Package opening.json must be an object") from None
 
     vid = _valid_id(meta.get("id") or meta.get("name"))
     if not vid or vid in BUILTIN:

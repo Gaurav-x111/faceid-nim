@@ -7,7 +7,7 @@
         |                                                  |     +--> template store (encrypted)
    pam_faceid.so (C) --- /run/faceid-nim/auth.sock --------+
                                                            |
-                                    /run/faceid-nim/vision.sock (JSON lines)
+                    /run/faceid-nim/worker/vision.sock (JSON lines)
                                                            v
                                vision worker (Python), user `faceid`, group `video`
                                camera -> detect -> quality -> align -> embed -> liveness
@@ -20,7 +20,7 @@
 | PAM → daemon | `SO_PEERCRED`, uid check, service allow-list | A caller may only request a face unlock for itself, unless it is root (gdm, sudo). |
 | daemon → worker | separate uid, socket mode 0660 | A compromised worker cannot read templates: it never receives them. |
 | daemon → UI | D-Bus signal carrying `(state, progress, reason)` | The extension is untrusted. It gets no frames, embeddings or scores. |
-| app → daemon | polkit (**not yet wired — see HANDOFF.md**) | Enrolling must require the account password. |
+| app → daemon | polkit (`daemon/src/authz.rs`, called from every write in `dbus.rs` and `enroll.rs`) | Enrolling must require the account password. |
 
 ## State machine
 

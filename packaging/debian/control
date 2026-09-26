@@ -1,16 +1,32 @@
 Source: faceid-nim
 Section: admin
 Priority: optional
-Maintainer: Gaurav <gaurav@example.invalid>
-Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.75), libpam0g-dev,
+Maintainer: Gaurav-x111 <gauravshah0777@gmail.com>
+Build-Depends: debhelper, cargo, rustc (>= 1.75), libpam0g-dev,
  meson, ninja-build, python3-all, python3-venv
 Standards-Version: 4.6.2
 Homepage: https://github.com/Gaurav-x111/faceid-nim
+Vcs-Git: https://github.com/Gaurav-x111/faceid-nim.git
+Vcs-Browser: https://github.com/Gaurav-x111/faceid-nim
 
 Package: faceid-nim
-Architecture: amd64
+# NOT a literal architecture. This package ships a compiled daemon
+# (faceid-nimd), a compiled PAM module, and a venv full of
+# arch-specific binary wheels (onnxruntime, opencv, mediapipe) -- so it
+# is architecture-dependent and dpkg must be told so, or it will happily
+# install an x86-64 ELF on an arm64 machine where it cannot execute.
+#
+# "any" here describes the SOURCE, which really is architecture
+# independent. override_dh_gencontrol in debian/rules replaces this
+# line with $(DEB_HOST_ARCH) for the binary package, and restores the
+# file afterwards. Do not "simplify" it to a literal arch or drop the
+# override: with a literal value both CI matrix legs emit the SAME
+# filename and one architecture silently replaces the other on the
+# release page.
+Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, libpam-runtime, python3 (>= 3.10),
- policykit-1 | polkitd, dbus, adduser
+ python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, gir1.2-gdkpixbuf-2.0,
+ policykit-1 | polkitd, dbus, adduser, libglib2.0-bin
 Recommends: gnome-shell (>= 45)
 Suggests: linux-enable-ir-emitter
 Description: Face unlock for Ubuntu with a lock-screen animation

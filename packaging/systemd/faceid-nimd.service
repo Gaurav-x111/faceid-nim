@@ -36,7 +36,7 @@ ProtectSystem=strict
 # /etc/faceid-nim is writable because SetSettings persists there;
 # ProtectSystem=strict would otherwise make every settings change fail
 # at the last step, after the polkit prompt has already succeeded.
-ReadWritePaths=/var/lib/faceid-nim /var/log/faceid-nim /run/faceid-nim /etc/faceid-nim
+ReadWritePaths=/var/lib/faceid-nim /var/log/faceid-nim /run/faceid-nim /etc/faceid-nim /etc/pam.d
 StateDirectory=faceid-nim
 # 0711: traverse-only. The unprivileged vision worker must be able to
 # reach models/ (installed 0755) but must never list the root, read

@@ -9,7 +9,17 @@ description = "Vision worker for faceid-nim"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
-  "opencv-python-headless>=4.9",
+  # Pinned EXACTLY, not just with a lower bound. The worker is a headless
+  # system service: a constraint like `opencv-python-headless>=4.9` is
+  # satisfied by any distribution providing the `cv2` module, and pip
+  # resolves that to `opencv_contrib_python` -- which drags Qt/X11 GUI
+  # libraries into a service that must not need a display. An exact
+  # `==` makes the intent unambiguous: no GUI, no contrib modules.
+  #
+  # 4.x is deliberate. OpenCV 5 renamed/reshuffled parts of the Python
+  # and VideoCapture surface; if you move to 5.x, run the camera and
+  # moire tests on real hardware first.
+  "opencv-python-headless>=4.9,<5",
   "onnxruntime>=1.17",
 ]
 

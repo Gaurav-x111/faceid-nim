@@ -55,14 +55,11 @@ def eer(genuine: np.ndarray, impostor: np.ndarray) -> tuple[float, float]:
 
 
 def tau_for_far(impostor: np.ndarray, target: float) -> float:
-    """Smallest threshold whose measured FAR is <= target.
-
-    If you have fewer than 1/target impostor scores you cannot measure
-    this; the script says so instead of quoting a fake number.
-    """
-    if impostor.size == 0:
+    if impostor.size == 0 or not 0.0 < target <= 1.0:
         return float("nan")
-    return float(np.quantile(impostor, 1.0 - target))
+    ordered = np.sort(impostor)
+    index = max(0, int(np.ceil((1.0 - target) * ordered.size)) - 1)
+    return float(np.nextafter(ordered[index], np.inf))
 
 
 def voting_far(impostor_by_group: dict[str, np.ndarray], tau: float,

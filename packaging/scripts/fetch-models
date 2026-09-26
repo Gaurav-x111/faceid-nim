@@ -68,15 +68,13 @@ PARSED="$(awk '
 [ -n "$PARSED" ] || { echo "fetch-models: no [model.*] entries in $MANIFEST" >&2; exit 1; }
 
 rc=0
-echo "$PARSED" | while IFS="$(printf '\t')" read -r name file url sha; do
+while IFS="$(printf '\t')" read -r name file url sha; do
     [ -n "$file" ] || { echo "  $name: no file= in manifest" >&2; rc=1; continue; }
     dest="$MODEL_DIR/$file"
 
     case "$sha" in
         ""|REPLACE_ME*|*[!0-9a-fA-F]*)
-            echo "  $name: manifest has no real SHA-256 yet ($sha)" >&2
-            echo "         refusing to fetch an unpinned model." >&2
-            rc=1
+            echo "  $name: unpinned (optional); not fetching until a SHA-256 is set"
             continue
             ;;
     esac
@@ -93,8 +91,6 @@ echo "$PARSED" | while IFS="$(printf '\t')" read -r name file url sha; do
     [ -n "$url" ] || { echo "  $name: no url= in manifest" >&2; rc=1; continue; }
 
     tmp="$(mktemp "$MODEL_DIR/.$file.XXXXXX")"
-    # Any exit from here on removes the temp file, so a killed or
-    # failed download never leaves something loadable behind.
     trap 'rm -f "$tmp"' EXIT INT TERM
 
     echo "  $name: downloading $url"
@@ -114,18 +110,18 @@ echo "$PARSED" | while IFS="$(printf '\t')" read -r name file url sha; do
     fi
 
     chmod 0644 "$tmp"
-    mv -f "$tmp" "$dest"          # atomic within the same filesystem
+    mv -f "$tmp" "$dest"
     trap - EXIT INT TERM
     echo "  $name: verified -> $dest"
-done
+done <<EOF
+$PARSED
+EOF
 
 if [ "$rc" -ne 0 ]; then
     echo "fetch-models: one or more models could not be fetched" >&2
 fi
-# Re-check the whole set rather than trusting the subshell's rc, which
-# a pipeline would swallow.
 if [ -x /usr/libexec/faceid-nim/verify-models ]; then
-    /usr/libexec/faceid-nim/verify-models --quiet
-else
-    exit "$rc"
+    /usr/libexec/faceid-nim/verify-models --quiet \
+        --manifest "$MANIFEST" --model-dir "$MODEL_DIR" || rc=1
 fi
+exit "$rc"

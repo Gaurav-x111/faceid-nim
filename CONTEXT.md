@@ -1,100 +1,209 @@
-# faceid@nim — Session Context (save 2026-09-21)
+# faceid-nim — Session Context (save 2026-09-26, later)
 
 ## Objective
-- Deliver the **premium 2.5cm arena Face ID unlock animation** (the user's final HTML spec: rings + spiral comet + head dot + beam + cornered face → green close → check + 8 particles → Verified → Welcome <uid>) and make it the default scan face, keeping the classic style selectable. Arena rebuilt to the spec; SIZE is now a physical **2.5cm × 2.5cm** square. **BLOCKING: gnome-shell never restarted (still PID 26024 from 16:49:56) — the whole new glyph is unloaded; user must log out/in. On Wayland `Alt+F2 → r` is a no-op (cannot restart the compositor), so nothing visual ever changes until then.**
-- Keep Face ID reliably working in `rgb` mode on this box by fixing the recurring `ir` flip (root cause found: `/dev/video3` misclassified as an IR camera — now `alt_of_rgb`). DONE + daemon restored (`mode=rgb, enabled=true, worker_reachable=true`).
-- Fixed moire false-positive (new prominence metric + soft temporal window). DONE but threshold 20.0 still needs genuine-face validation.
-- Audit improvements (#19). DONE.
-- Opening animations feature + opening-splash + "Welcome <uid>" + Premium success sequence (spring pill, PreviewAnimation, TestScan animation). DONE in repo + deployed user-level; GDM/installed-app sync pending user sudo.
+- **Auto dark/light camera mode** (DONE, code) + **universal one-command
+  install** (DONE, code). The worker measures room light per scan and
+  picks the sensor itself, so a dark room uses IR recognition and a lit
+  room uses RGB. Plus dual-spectrum enrollment, a room-light readout in
+  the app, and a light-calibration step in tune.
 
-## Status of the running system
-- **HARDWARE TRUTH (measured 17:35)**: this machine has **one** physical camera — `Integrated_Webcam_FHD` on `usb-0000:00:14.0-6`; `/dev/video0` is a v4l2-loopback dummy; `/dev/video1..4` are alternate nodes of that one RGB sensor. `/dev/video3` streams near-black (captured `mean 4.4, std 4.6, max 37`; card/bus identical to video1). **There is no IR camera and no IR illuminator**, so hybrid/ir liveness can never pass on this box — every scan gets `ir_screen_dark` and `sudo` falls through to the password (audit 17:28, `liveness_deny:ir_screen_dark`, `valid_frames:2`, RGB recognition was fine). Live mode is now **`rgb`** (camera=/dev/video1, `ir_camera:null`) via `SetSettings` — spoof gates remain moire/glare/device-frame/antispoof. `resolve_plan` classifies video3 as `rgb` (mono+color, no IR name hint), so the app will not re-push hybrid on this machine; the earlier flip to `ir` came from the degraded-plan bug (now guarded). Hybrid stays a valid default for machines that really have IR.
-- **RECURRING `ir` FLIP ROOT CAUSE + FIX (found in-session)**: `/dev/video3` exposes only `GREY` → `CameraInfo.kind` = `ir` → with `camera_mode:auto` every app refresh pushed `mode='ir'` → RGB recognition off (`sudo` → password). Fixed in `app/faceid_app/camera_discovery.py` — `_dedupe_same_sensor()` flags mono-only nodes sharing a card+color node as `alt_of_rgb` → `kind='none'`; plan now `mode=rgb, ir_camera=null`. Requires installed-app re-sync (`sudo cp -r app/faceid_app/. /usr/share/faceid-nim/app/faceid_app/`) or the next app open re-flips the daemon.
-- Daemon binary: installed `/usr/libexec/faceid-nim/faceid-nimd` = earlier hybrid build sha256 `02df37df…`; the **PreviewAnimation/TestScan build `f5bb2e5f…` is still PENDING install** (step 0 below) unless user has since run it.
-- **Config is user-settable over the bus** (daemon saves atomically as root, no sudo needed): root cause of the original "file never edited" issue. **Goes live immediately; every mode/enabled field is all-or-nothing — an omitted `enabled` DISABLES the daemon** (accidentally hit in-session; re-set `enabled:true`).
-- Live verified at session end: `Diagnostics` = `mode:"rgb", enabled:true, ir_camera:null, worker_reachable:true`.
-- `openings.json` currently: `scan_face:"arena"` (new default), `active:"logo"`.
-- **gnome-shell is STILL PID 26024 (started 16:49:56)** — the 2.5cm arena + spiral + classic-branch code is deployed to the extension dir (repo==deployed verified by sha1) but was imported by no one; **nothing has changed visually since 16:49. On Wayland `Alt+F2 → r` cannot restart the compositor (it is the session) — a logout/login or reboot is the ONLY way to load new module code.** This is exactly why "both (arena/classic) look the same".
+## What we are doing (active thread)
+- **DONE — auto-mode plan (items 1-9 of the previous context).** The
+  parallel pts/0 session implemented it: `meter.py`, `auto` in
+  `protocol.py`/`__main__.py`, `spectrum` in `ev_done` → `worker.rs`,
+  `CameraMode::Auto`, store v2 spectrum tags, spectrum-gated voting,
+  dual-spectrum enrollment, room-light readout, tune calibration.
+  All 24 Rust + 143 Python tests pass.
+- **DONE — the "make it universal" phases (1-6, code half).** All code
+  work is complete and verified, including a real `.deb` build. See
+  "What I just did" below. This session found and fixed **four
+  latent bugs that made the product non-functional or dishonest**, plus
+  one packaging bug that shipped stale code.
+- **LEFT — the user's half.** On-device verification, release accounts,
+  and the maintainer email. Needs a real machine, a real face, and
+  accounts I do not have. See "Left for the user".
 
-## Moire fix (core)
-- `vision/faceid_vision/liveness/screen.py` `_moire` = peak/median prominence in annulus r∈(24,56) of 128×128 Hanning FFT, `INTER_AREA` resize, flat-crop guard → 0. `MOIRE_THRESHOLD = 20.0`.
-- `vision/faceid_vision/scan.py`: soft `_MoireWindow` (`moire_frames=5`, `moire_required=3`); moire denied only when hits ≥ required in last N usable frames; `glare`/`device_frame` remain hard denies; IR mode skips `screen_report()`. Notes carry `moire`, `moire_threshold`, `moire_window{frames,hits,required}`.
-- Live baseline (no face, office, /dev/video1): 352 frames min 4.326 / med 5.987 / max 7.358 < 20. Synthetic grids ≥ 19k, jpeg-lattice ~38, random scene ~13.17 (passes). Old metric 0.154–0.210 vs 0.055 → always denied.
-- **Provisional:** no genuine-face crop measured yet — user must lock later and watch the pill not show moire-deny.
+## What I just did (verified, all green)
+- `vision/faceid_vision/landmarks.py` rewritten as a backend registry:
+  MediaPipe **Tasks API** first, legacy `solutions` second, and every
+  failure carries a reason. `face_landmarker.task` pinned in the
+  manifest (sha256 `64184e2…`, downloaded and hashed for real).
+- `models.py`: new `optional` flag + `resolve_optional()`. Detector and
+  recogniser stay required; optional models are refused when unpinned.
+- `vision/faceid_vision/hardware.py`: provider selection by building a
+  real session and checking `get_providers()` (ORT downgrades to CPU
+  with only a log line, so its provider list is not evidence); cgroup
+  and affinity-aware CPU count; threads capped at 4; caches to
+  `/run/faceid-nim/worker/hardware.json`; **never raises**.
+- `vision/faceid_vision/rt.py`: one session factory; `embed.py` and
+  `liveness/passive.py` both use it, so they can no longer drift.
+- `packaging/scripts/gpu-devices`: widens the worker sandbox **only** when
+  a GPU is present, and removes a stale drop-in when it is not.
+- `postinst` now really fetches the models (non-fatal), auto-detects the
+  cameras into the generated config, and prints achieved state instead
+  of instructions. New `faceid-nim-fetch-models.service` (oneshot,
+  `ExecCondition` skips when verified) retries on every boot. `postrm`
+  stops the units and removes the drop-in.
+- `bin/faceid-nim status` reports the **live** landmark backend,
+  anti-spoof state, execution provider, thread count and model — not just
+  what is installed. The app warns when liveness is reduced and never
+  shows a green state for a check that is not running.
+- Discovery core moved to `vision/faceid_vision/cameras.py` with
+  `auto_config()`; the app re-exports it (one implementation).
+- `debian/rules`: liveness extra is arch-tolerant and non-fatal (this is
+  what makes arm64 buildable at all), plus an import check and a
+  `diff` guard proving the installed package matches the source.
+- `install.sh` picks the `.deb` by `dpkg --print-architecture` and
+  refuses a mismatched package. CI builds both amd64 and arm64.
 
-## Hybrid wiring
-- `daemon/src/config.rs`: `CameraMode::Hybrid`; camera/ir_camera accept rgb_device/ir_device aliases (legacy keys OK, save() emits canonical). daemon `cargo test --release` → **17 passed**.
-- `vision/faceid_vision/scan.py` + `__main__.py`: IR gate `mode in ("ir","both","hybrid")`; `--mode` choices include hybrid.
-- `packaging/faceid-nim-config.toml` ships hybrid now.
-- Live worker evidence (private worker with PYTHONPATH=repo, deployed venv): both /dev/video1 and /dev/video3 held during hybrid scan; done 1 RGB embedding; `deny:["ir_screen_dark"]` on dark empty IR; moire 11.09 < 20; stats `{frames:1,usable:1,elapsed_ms:177}`.
+## Last audit pass: what the earlier sessions left undone
+Found and closed by a "what is actually left?" pass, not by reading plans:
+- **The audit never recorded which sensor ran.** The worker measures room
+  light, resolves a spectrum, and sends both; the daemon parsed `spectrum`
+  but silently **discarded `luma`**, and neither reached the audit log. So
+  "it did not unlock in the dark" was unanswerable from `faceid-nim audit`,
+  which is exactly the on-device test this project depends on. Both are now
+  in `audit::Event` (`spectrum`, `luma`) with tests, including one that
+  asserts no biometric ever reaches a log line.
+- **`app/data/gschema.xml` never learned about `mode = "auto"`** while
+  `CameraMode` in config.rs had it. The schema's own comment says it mirrors
+  the Config field names, so this was drift by its own definition. Fixed,
+  and `app/tests/test_mode_sets_agree.py` now cross-checks the Rust enum,
+  the gschema enum and the app's `CAMERA_MODE_VALUES` against each other
+  (verified: it fails when the gschema entry is removed).
+- `docs/UNIVERSAL-SETUP.md` still said "PLANNED, NOT IMPLEMENTED" -- a trap
+  for the next session. Now marked implemented, with a new Part 7 listing
+  the two genuinely open items.
+- README still claimed "Ubuntu 24.04+ on amd64" after the jammy/arm64 work.
+- `prefs.py` documented three `camera_mode` values while accepting four.
 
-## Audit plumbing (#19)
-- `daemon/src/worker.rs`: `Liveness.notes` (serde_json::Map), `DoneStats{frames,usable,elapsed_ms}`, `Event::Done.stats`, `ScanEvidence.usable`.
-- `daemon/src/audit.rs`: `Event` optional `moire_score`, `moire_threshold`, `valid_frames` (`skip_serializing_if`).
-- `daemon/src/session.rs`: log closure extended with notes + valid args, `note_f32` helper.
+## Release engineering: two BLOCKING bugs found in review
+- **`Architecture: any` was wrong, and it would have silently destroyed
+  the arm64 work.** The package ships a compiled daemon, a compiled PAM
+  module and arch-specific wheels (onnxruntime/opencv/mediapipe), so it
+  is architecture-dependent. Worse, `dh_gencontrol` does NOT pass `-P` to
+  dpkg-gencontrol, so the stanza is used verbatim: verified with
+  `dpkg-deb` that an `any` stanza yields `faceid-nim_<ver>_any.deb` from
+  *every* matrix leg, so one architecture replaces the other on the
+  release page, and `install.sh` (which asks for `_amd64.deb`/`_arm64.deb`)
+  404s on both. Fixed with `override_dh_gencontrol`, which stamps
+  `$(DEB_HOST_ARCH)` and then **restores** debian/control so a build
+  leaves no spurious edit in the tree. A two-arch stanza
+  (`Architecture: amd64 arm64`) is also wrong: it yields a malformed
+  `_amd64 arm64.deb` plus a control-parse warning. Verified by build:
+  `dist/faceid-nim_1.1.1-1_amd64.deb`, field `amd64`, ELF X86-64.
+- **`make deb` could not run anywhere.** `Build-Depends` lists `cargo` and
+  `rustc`, but the only toolchain new enough for the daemon is rustup,
+  which installs no dpkg package — so `dpkg-checkbuilddeps` fails on every
+  machine, stock CI runners included. Added `DEB_FLAGS ?=` (pass `-d` in
+  CI) plus a rustup step in both workflows. jammy's apt rustc is 1.59,
+  below the declared 1.75, so `apt install rustc` is not an option either.
+- Also fixed in ci.yml: the toolchain check ran *before* rustup was
+  installed, and the post-build assertions globbed `../faceid-nim_*.deb`
+  while the Makefile moves the artifact to `dist/`. Added an assertion
+  that the declared Architecture matches both the matrix and the ELF
+  header, so the `any` regression cannot come back.
 
-## Opening animations feature (#new)
-- Declarative-only opening animation engine. `shell-ext/faceid@nim/opening.js` (new) + reworked `pill.js`. The engine reads `~/.config/faceid-nim/openings.json` each scan and renders builtin variants `logo` / `glow` / `none` plus user-made specs. **Security invariant: everything is data (colors/easing/one logo), never code — a package cannot execute in gnome-shell.**
-- Custom spec keys (app editor ↔ engine): `kind, name, logo, text, bg, accent, ease(outCubic|outBack|outExpo), fade_ms(120–3000), scale, ring`.
-- Opening handoff to glyph waits on `grow>=1 && sinceStart>=duration()`; `setProgress`→verifying force-handoffs via `_opening.handoff(pill)`; `reset()` calls `_opening.reset(pill)`.
-- App: new **Opening** sidebar page (`main.py._opening_page`): Active-animation ComboRow (+pill preview swatch via cairo draw func), Create editor dialog, Install-from-file / Install-from-URL / Browse-community (fetches repo `openings/catalog.json`, default `DEFAULT_CATALOG_URL`), per-variant Edit / Publish-to-GitHub / Delete (confirm dialog).
-- `app/faceid_app/openings.py` (new lib): config CRUD, `create_variant`/`update_variant` (logo swap), `export_package`→zip, `install_package` (zip sanitised: path-traversal + size/file-count caps), `download_and_install`, `fetch_catalog`. `.faceopen` = zip(`opening.json` + logo.svg/png). Publish dialog exports to `~/Downloads` and shows copyable `gh gist create` / `gh release upload` commands.
-- Repo assets: `openings/README.md`, `openings/catalog.json` (lists `sunset`), `openings/packages/sunset.faceopen` (built via lib under scratch `XDG_CONFIG_HOME`).
-- Verified: `node --input-type=module --check` on all 6 ext js files; `python3 -W error -m py_compile` on main/openings; library round-trip (create→export→install, logo swap/clear) via scratch XDG. User-level deployed + `gnome-extensions disable/enable` → STATE ACTIVE, no new journal errors.
-- **GDM root cause found (the earlier “no animation at login”):** `/usr/share/gnome-shell/extensions/faceid@nim/pill.js` (from 15:30) still called `this._remove_style_class_name` → `reset()` threw on every lock, pill never attached at the GDM login. User-level copy was fixed at 15:37. **System-wide must be re-synced (pend user sudo): copy `opening.js` + `pill.js` to /usr/share too, then restart gdm.**
+## Four latent bugs found (all were silent)
+1. **`models.py` had a syntax error** (`license: str,`). `build_engine`
+   — the function that constructs the entire worker — could never run.
+   No test imported that module, so the suite was green. Fixed, plus
+   `vision/tests/test_imports.py` compiles and imports everything.
+2. **MediaPipe Face Mesh was dead** in the shipped venv: the worker asked
+   for `mp.solutions.face_mesh`, an API the installed wheel no longer
+   ships, and the `except Exception` swallowed the AttributeError. Blink,
+   parallax, challenge and the attention check were inert no-ops and
+   `strictness = heavy` could never be satisfied. Verified directly
+   against the real wheel and fixed via the Tasks API.
+3. **Stale `vision/build/` shipped old code inside a fresh `.deb`.**
+   setuptools reuses `build/lib/<pkg>/`; the build printed "venv OK"
+   while the packaged `landmarks.py` was hours out of date. Fixed by
+   deleting the tree before the build, plus a `diff` guard that fails the
+   build on ANY divergence (not a grep for a marker, which would rot).
+4. **`emitter_difference()` crashed on an out-of-frame box** — the
+   `size == 0` guard ran *after* `cvtColor` on an empty array.
 
-## Premium success animation (#new, per the unlock-animation spec)
-- Capital F feature wording: capsule is a **spring** (k=420, d=32), the success shows ring→check→`Verified`→`Welcome <uid>`, and the pill now decides its final act by the shell's own state captured at scan start (`_loginContext` = screen locked or gdm/login mode): laptop-open gets the `Welcome <uid>` reveal (now slower, `WELCOME_MS=2200`); `sudo`/polkit/test scans get `Verified` only — no personal greeting. Look updated to the Apple Face ID language: **premium arena scanner is the default scan face** (`faceGlyph.js`, per the user's final HTML spec): faint outer halo, cyan gradient crest + travelling head-dot + counter-rotating secondary dash + **orbiting spiral comet** (`_drawSpiral`, the spec's conic `.spiral`) + slow dotted inner ring + horizontal beam sweep + corner-bracketed face (spec silhouette: capsule head + dot eyes + nose tick); on match the crest flips to solid `#30d158`, face withdraws, checkmark springs in with equal-pop, radial glow pulse, **8-particle burst**, green halo behind the check. Pill uses glassmorphism `background-filter: blur(24px) saturate(180%)` + 1px white border. **The scan square is physically 2.5cm × 2.5cm** (`--hud-size: 2.5cm`): `pill.js glyphSizePx()` converts 25mm to logical px from the primary monitor's physical width (here 1920px/310mm → **GLYPH_SIZE ≈ 155px**, `CLOSED_WIDTH = GLYPH_SIZE`, `EXPANDED_WIDTH = GLYPH_SIZE + 190`). Files: `pill.js`, `faceGlyph.js`, `stylesheet.css` (deployed user-level; shell reload `Alt+F2 → r` required).
-- **scan_face style selector** (`openings.json` key `scan_face`, `"arena"` default | `"classic"`): `app/faceid_app/openings.py` `SCAN_FACES`/`set_scan_face`, `opening.js` `scanFace()` accessor, `pill.js` calls `_glyph.setScanFace(this._opening.scanFace())` in `startScanning`, `faceGlyph.js` `setScanFace()` branches `_redraw` to the original classic ring/face (no arena chrome). App UI: **Opening → Scanner → Scan face** ComboRow (`main.py` `on_scan_face_selected`).
-- **Camera misclassification root cause (recurring `mode` flips to `ir` → Face ID "not working")**: `/dev/video3` exposes only `GREY` → `CameraInfo.kind` = `ir`, so with `camera_mode: auto` every app refresh pushed `mode='ir'` — but video3 is an alternate node of the SAME RGB sensor (identical V4L2 card, bus `usb-0000:00:14.0-6`); there is NO IR camera. Fixed in `app/faceid_app/camera_discovery.py`: `_dedupe_same_sensor()` flags mono-only nodes that share a `card` with a color node as `alt_of_rgb` → `kind='none'`; discovery now yields video1=rgb / video3=none → plan `mode=rgb, ir_camera=null`. Requires re-sync of the installed app (`sudo cp -r app/faceid_app/. /usr/share/faceid-nim/app/faceid_app/`) or reopening the app re-flips the daemon. Also: recent manual `SetSettings` calls are **all-or-nothing** — omitting `enabled` disabled the daemon (had to re-set `enabled:true`).
-- Developer preview (§25): daemon `PreviewAnimation(userId)` (signal-only: emits waking→searching→verifying(ramp)→matched; no camera, no template read, no decision path, no polkit). Backed by app **Opening → “Preview success animation”** button (uses caller's first enabled identity) and CLI `gdbus call --system --dest org.faceidnim.Daemon1 --object-path /org/faceidnim/Daemon1 --method org.faceidnim.Daemon1.PreviewAnimation "name"`. Old daemons reject with UnknownMethod → app toasts “Preview unavailable”.
-- `pill.js` header now carries the **explicit AuthAnimationState mapping**: idle/verifying → matching `success-ring` (0→0.30 of matched) → `success-check` (ring collapses, ✓ draws) → `pill-expand`/`pill-settle` (cap springs, “Verified”) → `welcome` → `identity` (detail stage) → `complete` (contracting); `failure` stays the rejected shake+cross. Single `GLib.timeout_add(16ms)` clock, overlapping timeline, no sleeps (§2/§17/§20).
-- **Developer preview (§25)**: daemon `PreviewAnimation(userId)` (signal-only: emits waking→searching→verifying(ramp)→matched; no camera, no template read, no decision path, no polkit). Backed by app **Opening → “Preview success animation”** button (uses caller's first enabled identity) and CLI `gdbus call --system --dest org.faceidnim.Daemon1 --object-path /org/faceidnim/Daemon1 --method org.faceidnim.Daemon1.PreviewAnimation "name"`. Old daemons reject with UnknownMethod → app toasts “Preview unavailable”.
-- The pill listens on the system bus, so the SAME sequence plays for a screen unlock (incl. future GDM via system-wide sync) and for a `sudo` PAM prompt in the session — it never knows which service asked.
-- Motion tokens centralised in `pill.js` constants + mirrored as comments in `stylesheet.css` (St cannot evaluate CSS custom properties, so vars stay JS-only) (§18).
-- Verified: `cargo test --release` 17 passed; `node --input-type=module --check` all 6 js; `py_compile` app. Built `daemon/target/release/faceid-nimd` sha256 `f5bb2e5f…` but **NOT installed** (sudo pending). User-level extension redeployed + STATE ACTIVE, no new journal errors.
-- **Test scan now plays the animation too**: `TestScan` pipes the worker's live progress onto the same ScanState channel (waking → searching → verifying ramp), then emits `matched` reason `"Test scan"` (→ full ring/check/Verified/Welcome sequence) or `rejected` on failure — a real camera scan through the real pipeline, still no unlock and no failure-counter touch. App **Overview → Test a scan** runs on a worker thread now (window stays live) and toasts "Recognised".
+Also: the app's shim path resolution could not find `site-packages` in
+the real installed layout, and `exec_module` without registering in
+`sys.modules` broke `@dataclass`. Both fixed and tested for real
+(`app/tests/test_discovery_layouts.py` builds each layout and loads it in
+an isolated interpreter).
 
-## Shell extension: opening animation + Welcome <uid>
-- `shell-ext/faceid@nim/pill.js`: opening phase now delegated to `OpeningScene` (./opening.js) — capsule grows while the active variant plays, then hands off to glyph (`Looking for you…`). After matched→checkmark→padlock, **welcome** phase: `Welcome` (big, `faceid-welcome`) + uid (the identity name from matched `reason`, `faceid-uid`) pops in (scale 0.6→1 easeOutBack, `WELCOME_MS=2200`) then contracts.
-- `logo.svg` ships in the extension dir (builtin `logo` variant); loaded via GLib file URI so it works user-level AND system-wide.
-- `stylesheet.css`: `.faceid-logo` (36px bg-size), `.faceid-welcome` (20px/700), `.faceid-uid` (13px/600).
-- Deployed to `~/.local/share/gnome-shell/extensions/faceid@nim/` and reloaded (`gnome-extensions disable/enable faceid@nim`) — no errors. The `TypeError: this._indicator is null` in the journal was ubuntu-appindicators, unrelated.
-- Syntax check: `node --input-type=module --check < f.js` for each file (gjs has no --check).
-- **GDM (system-wide) install — PENDING user's sudo steps (now incl. the opening.js + fixed pill.js):**
-  1. `sudo cp shell-ext/faceid@nim/{pill.js,opening.js,extension.js,dbusClient.js,faceGlyph.js,logo.svg,stylesheet.css,metadata.json} /usr/share/gnome-shell/extensions/faceid@nim/`
-  2. `sudo chown -R root:root /usr/share/gnome-shell/extensions/faceid@nim`
-  3. `sudo -u gdm dbus-run-session -- gsettings set org.gnome.shell enabled-extensions "['faceid@nim']"` — DONE, dconf activated, no error.
-  4. `sudo -u gdm dbus-run-session -- gsettings get org.gnome.shell enabled-extensions` → should print `['faceid@nim']`.
-  5. `sudo systemctl restart gdm` — end current session, check pill at GDM login.
+## Left for the user (needs a machine, a face, or accounts)
+1. **Install and verify on the laptop.** `dist/faceid-nim_1.1.0-1_amd64.deb`
+   is built. `sudo apt install ./dist/faceid-nim_1.1.0-1_amd64.deb`, then
+   `sudo faceid-nim status` — expect `landmarks : mediapipe_tasks`, and
+   the model fetched automatically with no `fetch-models` command.
+2. **Dark room / lit room.** Auto mode must give IR unlock in the dark
+   and RGB unlock when lit. `sudo faceid-nim audit 20` for the reasons.
+3. **Measure tau per spectrum** (`eval/far_frr.py`). The shipped 0.40 is
+   still a placeholder with no evidence behind it.
+4. **MiniFASNet licence decision.** Still unpinned, so refused, and every
+   surface says so. Either pin a permissively-licensed ONNX export or
+   leave it reported as unavailable. Not a code blocker.
+5. **Maintainer email.** DONE in worktree (2026-09-26): `control` now
+   `Gaurav-x111 <gauravshah0777@gmail.com>` (from git config) +
+   `Vcs-Git`/`Vcs-Browser`; `Architecture: amd64` → `any`; new
+   `1.1.1-1` changelog entry (`jammy`) parses clean via dpkg-parsechangelog.
+   `install.sh` pin moved to single `PKG_VERSION=1.1.1-1` with leading-`v`
+   stripping. `release.yml` now builds amd64+arm64 on Ubuntu 22.04.
+6. **Build the base distro.** DONE in worktree (see 5): release builds on
+   22.04/jammy so one artifact installs on 22.04 and newer.
+7. **Push a tag** — STILL LEFT (needs the user): existing tags are named
+   `faceid@nim-v1.0.2`, which does NOT match release.yml's `v*` glob, so
+   no release has ever built. After committing item 5, run
+   `git tag -a v1.1.1 -m "faceid-nim 1.1.1" && git push origin v1.1.1`.
+   Note: a `git stash` entry from a 2026-09-26 recovery is still kept
+   (`stash@{0}`); drop it once the worktree is committed.
+8. **IR emitter** (`linux-enable-ir-emitter`) if the IR path is to be
+   proven rather than assumed on this laptop.
 
-## Facts / reference
-- GNOME Shell 46.0, Wayland, ubuntu:GNOME, gjs 1.80.2.
-- Daemon DBus interface `org.faceidnim.Daemon1` @ `/org/faceidnim/Daemon1` on system bus. Methods: `GetSettings`, `SetSettings(json)` (ungated, persists to /etc/faceid-nim/config.toml; ignores daemon-owned paths), `Diagnostics`, `TestScan` (0 args; takes a real scan, error if no face; drives the pill's full animation too), `PreviewAnimation(userId)` (NEW, in repo binary — empty name → just “Welcome”), `Enroll` (polkit-gated), etc. Signal `ScanState(state, progress, reason)` → drives the pill; on matched `reason` = winning identity name.
-- `daemon/src/main.rs:32`: `CONFIG_PATH = "/etc/faceid-nim/config.toml"`.
-- `daemon/src/dbus.rs`: get_settings ~155, set_settings ~160, diagnostics ~176, scan_state signal.
-- PAM: `/etc/pam.d/common-auth` line 17 `auth [success=3 default=ignore] pam_faceid.so quiet timeout=4500`; `pam_faceid.so` in `/usr/lib/security/`. Both `faceid-nimd` + `faceid-vision` systemd units enabled at boot.
-- **Worker stranding trap**: `faceid-vision.service` has `PartOf=faceid-nimd.service`, so `systemctl stop faceid-nimd` also stops the worker but `start` does NOT bring it back → app status dot goes red "Worker is not responding". Repo unit now adds `Wants=faceid-vision.service` to the daemon. Recovery: `sudo systemctl start faceid-vision.service` (or use `systemctl restart faceid-nimd`, which propagates).
-- `faceid-vision.service` ExecStart uses `venv/bin/python3 -m faceid_vision --socket ... --device /dev/video1 --model-dir ... --manifest ...` (no `--mode`; daemon sends explicit mode per request).
-- **Extension module cache**: GJS caches imported extension modules (`pill.js`/`dbusClient.js`) for the whole gnome-shell session, so `gnome-extensions disable/enable` does NOT pick up file changes — a shell restart is required. **On this Wayland host `Alt+F2 → r` is a no-op for the compositor** (gnome-shell *is* the session), so the ONLY way to load new module code is **log out/in or reboot** (`systemctl restart gdm` also ends the session and is the natural moment to test the GDM pill). Symptom seen all session: "animation not updated / boxy pill / both styles look the same" while the running module is stale.
-- **Degraded-plan incident (2026-09-21)**: while the worker was down, the app's camera discovery produced an `ir`-only plan and auto-pushed it to the daemon (overwriting hybrid). Diagnostics then read `mode:"ir"` → RGB recognition off → every `sudo -k` fell through to the password prompt. Fixed: `app/faceid_app/main.py` `_apply_refresh` now only auto-pushes the plan when `worker_reachable` is true (added at line ~732). Recovery used `SetSettings {mode:"hybrid",camera:"/dev/video1",ir_camera:"/dev/video3"}` (user-settable, saved atomically) — verified `GetSettings`/`Diagnostics` = hybrid + worker_reachable:true.
-- Extension is user-level (`~/.local/share/gnome-shell/extensions/faceid@nim/`); installed `extension.js` DIFFERS from repo (extra `_promptBox` fallbacks) — do NOT clobber the user-level extension.js wholesale. repo extension.js is 153 lines incl. multi-path `_promptBox`.
-- `redeploy.sh` uses staged install (`mktemp -d`, cp vision/faceid_vision, pip `--force-reinstall --no-deps`) because in-tree `vision/build/` is root-owned.
-- No passwordless sudo (`sudo -n` fails); user runs sudo interactively. I (agent) ran system-bus calls + writes only as zang.
-- `bin/faceid-nim status`: worker socket shows "MISSING" for zang because `/run/faceid-nim/worker/` is `drwxrwx--- root faceid` (permission artifact, not a real failure).
-- Vision suite 39 passed (`vision/tests/test_moire.py`, `test_liveness_mode.py`); daemon 17 passed.
-- App logo: `app/data/icons/hicolor/scalable/apps/org.faceidnim.App.svg`.
+## Key findings (verified in code, do not re-derive)
+- `debian/rules` is a makefile: make hands each recipe line to the shell
+  separately, so an `if ... fi` block MUST be one logical line with `\`
+  continuations. A multi-line block is a syntax error.
+- The venv in a `.deb` uses *relative* symlinks, so extracting to a
+  non-root DESTDIR leaves `venv/bin/python3` unrunnable. Not a bug.
+- This repo is installed **editable into the system python**
+  (`__editable__.faceid_vision-0.1.0.pth`). Any test of a packaged
+  layout must use `python3 -I` or the ambient install answers first.
+- `mediapipe` 0.10.35 has `tasks/` but no `solutions/`; LIVE_STREAM needs
+  a result callback, `VIDEO` does not and is the right mode for camera
+  frames (strictly increasing ms timestamps).
+- The app runs on the *system* python; the venv is worker-only and has no
+  PyGObject. So `app/faceid_app` cannot import anything from the venv by
+  default — hence the roots list and `FACEID_VISION_ROOTS` override in
+  the discovery shim.
+- ONNX/CNN stack: YuNet (detect) + SFace 128-d (recognise) via
+  onnxruntime, ArcFace 5-point similarity align to 112×112, cosine +
+  k-of-n voting in Rust. Liveness is mostly classical CV (FFT moiré,
+  glare, IR skin response, homography planarity, EAR blink), not deep
+  learning.
+- `faceid-vision.service` has `DevicePolicy=closed` with only
+  `char-video4linux`; `CapabilityBoundingSet=` is empty and must stay so.
 
-## Constraints
-- Never bypass moire, never lower the threshold as "the fix", never weaken tau. Mode is the sole authority — never promote a scan to IR analysis from negotiated format.
-- `tau=0.40` is still a placeholder — measure with `eval/far_frr.py` when pairs data exists.
+## How to verify
+- `make test` (cargo test + pytest), `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `node --input-type=module --check` on
+  the extension JS, `gcc -Wall -Wextra -Werror` on the PAM module.
+- `.deb`: `dpkg-buildpackage -us -uc -b -d` (the `-d` is needed here;
+  cargo/rustc are rustup-installed, not dpkg-installed). Then
+  `dpkg-deb -x` and import the packaged venv's site-packages to prove the
+  shipped code is current.
 
-## Next steps for user
-0. **Log out and back in (or reboot)** — the blocking item. gnome-shell is still PID 26024 from 16:49:56 and every lock since has shown the stale pre-arena module; on Wayland `Alt+F2 → r` cannot restart the compositor. After login, lock to see the 2.5cm arena scan (spiral comet + crest + particles → green check → Verified → Welcome <uid>); then **Opening → Scanner → Scan face → Classic** and lock again to confirm the two styles visibly differ.
-1. **Install the new daemon binary** (adds `PreviewAnimation` + animated `TestScan`): `sudo systemctl stop faceid-nimd && sudo cp daemon/target/release/faceid-nimd /usr/libexec/faceid-nim/faceid-nimd && sudo systemctl start faceid-nimd` (verify `sha256sum` starts `f5bb2e5f`), then test `gdbus call --system --dest org.faceidnim.Daemon1 --object-path /org/faceidnim/Daemon1 --method org.faceidnim.Daemon1.PreviewAnimation "Gaurav"` — the pill should play scan→ring→check→Verified→Welcome→Gaurav.
-2. **Sync the system-wide extension** (so the GDM login screen gets the fixed + new files): `sudo cp shell-ext/faceid@nim/{pill.js,opening.js,extension.js,dbusClient.js,faceGlyph.js,logo.svg,stylesheet.css,metadata.json} /usr/share/gnome-shell/extensions/faceid@nim/ && sudo chown -R root:root /usr/share/gnome-shell/extensions/faceid@nim`, then `sudo systemctl restart gdm` (this also ends the session — do it together with step 0).
-3. **Sync the installed settings app** — critical for the `ir`-flip fix to stick: `sudo cp -r app/faceid_app/. /usr/share/faceid-nim/app/faceid_app/`. Until done, every app open re-pushes `mode='ir'` and breaks Face ID; verify after sync that **Overview/camera** shows `mode: rgb` and Diagnostics `worker_reachable:true`.
-4. **Test the Opening page**: fresh app → **Opening**, switch active (`glow`/`none`), use **Preview success animation**, install `openings/packages/sunset.faceopen`, then — with the session reloaded — lock+unlock.
-5. **Push the repo** so `openings/catalog.json` (→ `raw.githubusercontent.com/Gaurav-x111/faceid-nim/main/...`) resolves for “Browse community”.
-6. Real-face validation: lock + unlock **and** `sudo true` in a terminal; both should play the spring/ring/check “Verified → Welcome → <uid>” sequence (sudo shows only “Verified”). Confirm no `liveness_deny:moire` in any real scan.
-7. Optional: `strictness="heavy"` + `require_attention=true` (was offered; not decided).
+## Genuinely still open (not code-blocked)
+1. **First-run automatic tau calibration.** `auto_tune.py` can measure tau
+   from a `.npz`, but it is not wired into the enrollment wizard, so a fresh
+   install still ships `tau = 0.40` with no evidence behind it. Needs the
+   wizard to capture passes, compute the genuine/impostor separation, and
+   write it through the existing polkit-gated `SetSettings`. Report the
+   measured EER, never "99% accurate".
+2. **MiniFASNet licence.** No stably-hosted permissively-licensed ONNX
+   export is known, so the manifest entry stays unpinned and
+   `resolve_optional()` refuses it. Every surface now reports the check as
+   unavailable, so this is a known, honest state rather than a bug.
+
+## Pending from the user's earlier request
+- `sudo faceid-nim audit 20` + `faceid-nim status` to pinpoint their
+  personal non-recognition cause (likely a liveness veto or lockout).
+  The TestScan pipeline fix for that landed earlier.

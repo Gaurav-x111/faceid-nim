@@ -18,22 +18,40 @@ import numpy as np
 
 class PassiveAntiSpoof:
     def __init__(self, model_path: Path | str | None, input_size: int = 80,
-                 scale: float = 2.7, deny_threshold: float = 0.7):
+                 scale: float = 2.7, deny_threshold: float = 0.7,
+                 providers: list[str] | None = None):
         self.available = False
+        #: Why this model is not running, in one line. Empty when it is.
+        #: This exists because the deny cue silently never fired for the
+        #: whole life of the feature while the UI still implied a check
+        #: was running.
+        self.reason = ""
+        self.model_path = str(model_path) if model_path else ""
         self.deny_threshold = deny_threshold
         self.input_size = input_size
         self.scale = scale
         self._sess = None
+        self._input = ""
         if model_path is None:
+            self.reason = ("no anti-spoof model installed; the "
+                           "antispoof_model deny cue cannot fire")
             return
         try:
-            import onnxruntime as ort
-            self._sess = ort.InferenceSession(
-                str(model_path), providers=["CPUExecutionProvider"])
+            # Same factory as the recognizer, so the two cannot drift
+            # apart on provider choice or thread sizing again.
+            from .. import rt
+
+            self._sess = rt.session(model_path, providers=providers)
             self._input = self._sess.get_inputs()[0].name
             self.available = True
-        except Exception:
+        except Exception as e:
             self.available = False
+            self.reason = (f"anti-spoof model {Path(model_path).name} could "
+                           f"not be loaded: {type(e).__name__}: {e}")
+
+    @property
+    def providers(self) -> list[str]:
+        return list(self._sess.get_providers()) if self._sess is not None else []
 
     def _crop(self, frame_bgr: np.ndarray, box) -> np.ndarray:
         """MiniFASNet wants context around the face, not a tight crop:
@@ -61,10 +79,17 @@ class PassiveAntiSpoof:
         patch = self._crop(frame_bgr, box).astype(np.float32) / 255.0
         blob = np.transpose(patch, (2, 0, 1))[None]
         try:
-            out = self._sess.run(None, {self._input: blob})[0][0]
+            out = self._sess.run(None, {self._input: blob})[0]
         except Exception:
             return None
-        e = np.exp(out - out.max())
+        arr = np.asarray(out, dtype=np.float64).reshape(-1)
+        if arr.size == 0:
+            return None
+        if arr.size == 1:
+            # Single-logit model: sigmoid = P(spoof).
+            p_spoof = float(1.0 / (1.0 + np.exp(-arr[0])))
+            return p_spoof
+        e = np.exp(arr - arr.max())
         probs = e / e.sum()
         # MiniFASNet convention: class 1 is the live class, 0 and 2 are
         # print and replay attacks. Verify against your model card.

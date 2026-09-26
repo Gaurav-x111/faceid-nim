@@ -36,7 +36,7 @@ override_dh_auto_build:
 	    -o pam/pam_faceid.so pam/pam_faceid.c -lpam
 
 override_dh_auto_test:
-	cd daemon && cargo test --release --offline || true
+	cd daemon && cargo test --release --offline || cargo test --release
 
 override_dh_auto_install:
 	# --- daemon + PAM module ---------------------------------------
@@ -50,7 +50,64 @@ override_dh_auto_install:
 	# strictness and the attention check both require.
 	python3 -m venv $(VENV)
 	$(VENV)/bin/pip install --no-cache-dir --upgrade pip wheel
-	$(VENV)/bin/pip install --no-cache-dir './vision[liveness]'
+	# Copy to a writable scratch dir first: setuptools builds the wheel
+	# in-tree (vision/build/), so a stale root-owned build/ left by a
+	# past `sudo make install` would break the package build here.
+	rm -rf /tmp/faceid-vision-pkg
+	cp -r vision /tmp/faceid-vision-pkg
+	chmod -R u+w /tmp/faceid-vision-pkg
+	# ...and then DELETE the stale build/ and egg-info from the copy.
+	# This is not hygiene, it is a correctness fix. setuptools reuses
+	# build/lib/<pkg>/ when it is already populated, so an old
+	# `sudo make install` leaves a tree of previous sources that gets
+	# baked into a freshly built wheel. Observed doing exactly that:
+	# the build printed "venv OK" while shipping a landmarks.py several
+	# hours out of date. The failure is silent and the artifact is
+	# released.
+	rm -rf /tmp/faceid-vision-pkg/build /tmp/faceid-vision-pkg/*.egg-info
+	find /tmp/faceid-vision-pkg -name __pycache__ -type d -prune -exec rm -rf {} +
+
+	# The liveness extra is BEST EFFORT, per architecture.
+	#
+	# mediapipe publishes x86_64 wheels only. On arm64 the install below
+	# cannot succeed, and because the whole .deb is built in one run, a
+	# hard failure here means NO package at all for every ARM laptop --
+	# which is most of them. So: try, and if it fails, install the base
+	# dependencies and record what was skipped. The worker already
+	# degrades correctly with no landmark backend (it reports
+	# "landmarks: unavailable" and keeps recognition working), and
+	# postinst plus `faceid-nim status` both say so out loud. A user
+	# must never have to choose between "no face unlock" and "no
+	# package".
+	# Written as ONE logical line with backslash continuations on
+	# purpose: this is a makefile, and make hands each recipe line to the
+	# shell separately, so a multi-line `if ... fi` block is a syntax
+	# error here. Every other recipe in this file follows the same rule.
+	if ! $(VENV)/bin/pip install --no-cache-dir '/tmp/faceid-vision-pkg[liveness]'; then \
+		echo "faceid-nim: the liveness extra (mediapipe) is unavailable for $(DEB_HOST_ARCH) on this Python. Continuing without it."; \
+		echo "            Blink, 3D and attention checks will report 'unavailable';"; \
+		echo "            recognition and screen/print/IR spoof cues still work."; \
+		$(VENV)/bin/pip install --no-cache-dir /tmp/faceid-vision-pkg || { echo "faceid-nim: base vision install FAILED - aborting"; exit 1; }; \
+	fi
+	# Prove the thing we just built can actually be imported, and that the
+	# landmark backend is honest about what it is. A venv that imports
+	# cleanly is the difference between "installed" and "installed and
+	# starts" -- and a worker whose build_engine cannot run is exactly
+	# the failure this whole reporting chain exists to prevent.
+	$(VENV)/bin/python3 -c "import faceid_vision.__main__ as m; print('faceid-nim: venv OK')"
+	# Then prove the INSTALLED copy is the copy we meant to ship, module
+	# by module. Deliberately not a grep for some marker string: any
+	# content check rots the next time the code changes, whereas "the
+	# bytes we installed are the bytes we wrote" cannot. Catches a stale
+	# build/ tree, a half-copied file, and a packaging filter that
+	# silently dropped a module.
+	diff -r -x '__pycache__' -x '*.pyc' -x '*.dist-info' -x '*.egg-info' \
+	    /tmp/faceid-vision-pkg/faceid_vision $(VENV)/lib/python*/site-packages/faceid_vision \
+	    || { echo "faceid-nim: FATAL - the installed vision package differs from the source."; \
+	         echo "            A stale build/ tree is the usual cause. Refusing to ship."; \
+	         exit 1; }
+	echo "faceid-nim: installed vision package matches the source"
+	rm -rf /tmp/faceid-vision-pkg
 	# Rewrite the venv shebangs and paths to the installed location,
 	# not the build tree.
 	sed -i '1s|.*|#!$(LIBEXEC)/venv/bin/python3|' $(VENV)/bin/pip* || true
@@ -63,6 +120,10 @@ override_dh_auto_install:
 	cp -r app/faceid_app $(DESTDIR)/usr/share/faceid-nim/app/
 	install -m 0644 app/faceid_app/style.css \
 	    $(DESTDIR)/usr/share/faceid-nim/app/faceid_app/
+	# Glance video-pill default opening (Opening page -> Preview video pill).
+	install -d $(DESTDIR)/usr/share/faceid-nim/linux-anim
+	cp -r linux-anim/glance_anim linux-anim/test_anim.py linux-anim/run.sh linux-anim/README.md $(DESTDIR)/usr/share/faceid-nim/linux-anim/
+	rm -rf $(DESTDIR)/usr/share/faceid-nim/linux-anim/glance_anim/__pycache__
 	install -d $(DESTDIR)/usr/share/applications
 	install -m 0644 app/data/org.faceidnim.App.desktop \
 	    $(DESTDIR)/usr/share/applications/
@@ -92,6 +153,7 @@ override_dh_auto_install:
 	install -d $(DESTDIR)/lib/systemd/system
 	install -m 0644 packaging/systemd/faceid-nimd.service \
 	                packaging/systemd/faceid-vision.service \
+	                packaging/systemd/faceid-nim-fetch-models.service \
 	    $(DESTDIR)/lib/systemd/system/
 	install -d $(DESTDIR)/usr/share/dbus-1/system.d
 	install -m 0644 packaging/dbus/org.faceidnim.Daemon1.conf \
@@ -109,15 +171,50 @@ override_dh_auto_install:
 	# --- helper scripts and the CLI ---------------------------------
 	install -m 0755 packaging/scripts/fetch-models  $(DESTDIR)$(LIBEXEC)/
 	install -m 0755 packaging/scripts/verify-models $(DESTDIR)$(LIBEXEC)/
+	install -m 0755 packaging/scripts/check-updates $(DESTDIR)$(LIBEXEC)/
+	install -m 0755 packaging/scripts/ir-emitter $(DESTDIR)$(LIBEXEC)/
+	install -m 0755 packaging/scripts/gpu-devices $(DESTDIR)$(LIBEXEC)/
+	install -m 0755 packaging/scripts/diagnose.sh $(DESTDIR)$(LIBEXEC)/faceid-nim-diagnose
 	install -d $(DESTDIR)/usr/bin
 	install -m 0755 bin/faceid-nim $(DESTDIR)/usr/bin/faceid-nim
+	install -m 0755 packaging/faceid-app $(DESTDIR)/usr/bin/faceid-app
+
+override_dh_gencontrol:
+	# Stamp the binary package with the architecture we are ACTUALLY
+	# building for. The stanza in debian/control says "any" because the
+	# source is architecture-independent; the binary is not, and dpkg is
+	# told the truth here.
+	#
+	# Why this override exists: dh_gencontrol does NOT pass -P to
+	# dpkg-gencontrol, so the Architecture field from the stanza is used
+	# verbatim. Leaving it as a literal (or "any") makes every CI matrix
+	# leg emit the SAME filename -- faceid-nim_<ver>_any.deb -- so the
+	# second architecture to finish silently replaces the first on the
+	# release page, and install.sh, which asks for _amd64.deb / _arm64.deb,
+	# gets a 404 either way. Verified with dpkg-deb: an "any" stanza
+	# yields "_any.deb"; a two-arch stanza yields a malformed
+	# "_amd64 arm64.deb" plus a control-parse warning.
+	#
+	# The source file is restored afterwards. Rewriting it in place would
+	# leave the build host's architecture sitting in the working tree, so
+	# a build on amd64 would make `git status` report a spurious edit and
+	# the committed stanza would stop being the truth.
+	cp debian/control debian/control.faceid-arch.bak
+	sed -i 's/^Architecture:.*/Architecture: $(DEB_HOST_ARCH)/' debian/control
+	dh_gencontrol
+	mv debian/control.faceid-arch.bak debian/control
 
 override_dh_installsystemd:
-	# Both units are enabled here; the PAM profile stays Default: no,
+	# All three units are enabled here; the PAM profile stays Default: no,
 	# so a running daemon still does not change how anything
 	# authenticates until the user opts in.
+	#
+	# The fetch-models unit is WantedBy multi-user.target and carries an
+	# ExecCondition that skips when verification already passes, so the
+	# steady-state cost of enabling it is one sha256sum per model.
 	dh_installsystemd --name=faceid-nimd --no-stop-on-upgrade
 	dh_installsystemd --name=faceid-vision --no-stop-on-upgrade
+	dh_installsystemd --name=faceid-nim-fetch-models --no-stop-on-upgrade
 
 override_dh_strip:
 	dh_strip --exclude=venv

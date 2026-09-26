@@ -4,14 +4,15 @@
 //! exists, which also means it cannot keep anything under $HOME.
 //!
 //! Three sockets, three trust levels:
-//!   /run/faceid-nim/auth.sock    any local user may ask (uid-checked)
-//!   /run/faceid-nim/vision.sock  the unprivileged worker
+//!   /run/faceid-nim/auth.sock          any local user may ask (uid-checked)
+//!   /run/faceid-nim/worker/vision.sock the unprivileged worker
 //!   system bus                   the app and the shell pill
 //!
 //! Nothing in this process ever sends a camera frame or an embedding
 //! to the UI, and nothing in the UI can influence the decision.
 
 mod audit;
+mod authz;
 mod config;
 mod dbus;
 mod enroll;
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
 
     let store = Arc::new(store::Store::open(&cfg.data_dir).context("open template store")?);
     let audit = Arc::new(audit::Audit::new(&cfg.audit_log));
+    audit.configure_timeline(&cfg.timeline_log, cfg.timeline_enabled);
     let worker = Arc::new(worker::Worker::new(cfg.worker_socket.clone()));
     let auth_sock = cfg.auth_socket.clone();
     let cfg = Arc::new(Mutex::new(cfg));
@@ -71,6 +73,7 @@ async fn main() -> Result<()> {
         policy: Arc::new(Mutex::new(policy::Policy::default())),
         audit: audit.clone(),
         state_tx,
+        scan_slots: Arc::new(tokio::sync::Semaphore::new(2)),
     });
 
     // D-Bus is best-effort: if the bus is unavailable the pill and the

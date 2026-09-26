@@ -81,7 +81,9 @@ def _scan_with_ir(engine, mode, ir_cam):
 
 def test_ir_mode_never_calls_screen_report(monkeypatch):
     """mode="ir" must not even invoke screen_report(): its moire/glare
-    thresholds are webcam-tuned and false-positive on IR noise."""
+    thresholds are webcam-tuned and false-positive on IR noise. The
+    IR-primary native cue (analyse_ir_face on the primary frame) MAY
+    still run — only RGB cues are forbidden here."""
     def _boom(*_a, **_k):
         raise AssertionError("screen_report() called in IR mode")
     monkeypatch.setattr("faceid_vision.scan.screen_report", _boom)
@@ -90,7 +92,8 @@ def test_ir_mode_never_calls_screen_report(monkeypatch):
                         lambda *a, **k: _ok_report())
     res = _scan(_engine(), mode="ir")
     assert res.error is None
-    assert res.liveness.deny == []
+    for cue in res.liveness.deny:
+        assert cue in ("ir_screen_dark", "antispoof_model", "planar_photo")
     assert res.liveness.notes.get("moire") is None
     assert res.liveness.notes.get("glare_frac") is None
     assert len(res.embeddings) > 0

@@ -39,11 +39,121 @@ pub struct Liveness {
 #[derive(Debug, Deserialize, Default)]
 pub struct DoneStats {
     #[serde(default)]
-    pub frames: u64,
-    #[serde(default)]
     pub usable: u64,
+}
+
+/// What the worker reports it can actually do on this machine.
+///
+/// Every optional feature carries a `*_reason`. That is the whole point:
+/// a liveness backend that failed to load used to be swallowed into a
+/// bare `false`, so a build shipped with blink, parallax and the
+/// attention check silently inert while every test still passed. The
+/// reason travels to `Diagnostics` and from there into the app, so the
+/// UI can say "reduced" instead of implying a check that never ran.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Capabilities {
     #[serde(default)]
-    pub elapsed_ms: u64,
+    pub mesh: bool,
+    /// Which landmark backend is live: "mediapipe_tasks",
+    /// "mediapipe_solutions" or "none".
+    #[serde(default)]
+    pub landmarks: String,
+    #[serde(default)]
+    pub landmarks_reason: String,
+    #[serde(default)]
+    pub antispoof: bool,
+    #[serde(default)]
+    pub antispoof_reason: String,
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub embedding_dim: u32,
+    #[serde(default)]
+    pub ir: bool,
+    #[serde(default)]
+    pub accel: AccelInfo,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct AccelInfo {
+    /// Providers actually in use, read back from the live session rather
+    /// than from what was requested.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    #[serde(default)]
+    pub cpu_count: u32,
+    #[serde(default)]
+    pub threads: u32,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub arch: String,
+    /// Set when the worker could not prove an accelerator and is
+    /// reporting what onnxruntime merely listed.
+    #[serde(default)]
+    pub unverified: bool,
+}
+
+impl AccelInfo {
+    /// Human-readable "what am I actually running on" line.
+    pub fn summary(&self) -> String {
+        let ep = if self.providers.is_empty() {
+            "unknown".to_string()
+        } else {
+            self.providers.join("+")
+        };
+        if self.cpu_count == 0 {
+            return ep;
+        }
+        format!(
+            "{ep} · {} CPU threads, {}/session",
+            self.cpu_count, self.threads
+        )
+    }
+}
+
+impl Capabilities {
+    /// One-line verdict for `faceid-nim status` and the app.
+    pub fn liveness_summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(if self.mesh {
+            format!("landmarks: {}", non_empty(&self.landmarks, "available"))
+        } else {
+            format!(
+                "landmarks: unavailable ({})",
+                first_line(&self.landmarks_reason)
+            )
+        });
+        parts.push(if self.antispoof {
+            "ML anti-spoof: active".to_string()
+        } else {
+            format!(
+                "ML anti-spoof: unavailable ({})",
+                first_line(&self.antispoof_reason)
+            )
+        });
+        parts.join(" · ")
+    }
+}
+
+fn non_empty(s: &str, fallback: &str) -> String {
+    if s.trim().is_empty() || s == "none" {
+        fallback.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Keep a diagnostic to one line: it is shown in a UI list and appended
+/// to a single-line log, and a multi-line model traceback would break
+/// both.
+fn first_line(s: &str) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        "no reason reported".to_string()
+    } else {
+        line.to_string()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,14 +174,21 @@ enum Event {
         liveness: Liveness,
         #[serde(default)]
         stats: Option<DoneStats>,
+        /// Recognition spectrum the worker resolved ("rgb"/"ir").
+        /// Empty/absent = legacy: match against all templates.
+        #[serde(default)]
+        spectrum: String,
+        /// Measured room light behind an auto-mode decision, 0-255.
+        /// Absent for a fixed rgb/ir mode, or when the measurement failed.
+        /// Carried into the audit so a miscalibrated brightness gate is
+        /// visible after the fact rather than a mystery.
+        #[serde(default)]
+        luma: Option<f32>,
     },
     #[serde(rename = "error")]
     Error { reason: String },
     #[serde(rename = "capabilities")]
     Capabilities {
-        // Received for completeness; the daemon never makes decisions
-        // from the worker's capabilities list, so these are unread by
-        // design.
         #[allow(dead_code)]
         #[serde(default)]
         model_id: String,
@@ -111,6 +228,13 @@ pub struct ScanEvidence {
     pub liveness: Liveness,
     /// Usable (quality-passing) frames, from the worker's done stats.
     pub usable: u64,
+    /// Resolved recognition spectrum ("rgb"/"ir"/""). Empty matches all.
+    pub spectrum: String,
+    /// Room light behind an auto-mode decision, 0-255, if the worker
+    /// measured one. None for a fixed rgb/ir mode, or on a failed
+    /// measurement. Goes into the audit so "it picked the wrong sensor"
+    /// is answerable after the fact.
+    pub luma: Option<f32>,
 }
 
 pub struct Worker {
@@ -141,6 +265,7 @@ impl Worker {
         preview_tx: Option<mpsc::Sender<Vec<u8>>>,
         ir_device: Option<String>,
         guide_tx: Option<mpsc::Sender<(String, String)>>,
+        device: Option<String>,
     ) -> Result<ScanEvidence> {
         let mut stream = UnixStream::connect(&self.socket)
             .await
@@ -152,6 +277,9 @@ impl Worker {
         });
         if let Some(dev) = ir_device {
             req["ir_device"] = dev.into();
+        }
+        if let Some(dev) = device {
+            req["device"] = dev.into();
         }
         stream.write_all(format!("{req}\n").as_bytes()).await?;
         stream.flush().await?;
@@ -197,12 +325,16 @@ impl Worker {
                     model_id,
                     liveness,
                     stats,
+                    spectrum,
+                    luma,
                 } => {
                     return Ok(ScanEvidence {
                         embeddings,
                         model_id,
                         liveness,
                         usable: stats.map(|s| s.usable).unwrap_or(0),
+                        spectrum,
+                        luma,
                     })
                 }
                 Event::Error { reason } => return Err(anyhow!("worker: {reason}")),
@@ -243,6 +375,40 @@ impl Worker {
             timeout(Duration::from_millis(800), lines.next_line()).await,
             Ok(Ok(Some(_)))
         )
+    }
+
+    /// Ask the worker what it can actually do here.
+    ///
+    /// This is also the daemon's only positive evidence that the models
+    /// loaded: `build_engine` resolves the detector and the recognizer
+    /// before the worker ever binds its socket, so a worker that answers
+    /// at all is a worker whose recognition models are present and
+    /// checksum-verified. That is what `models_ready` in Diagnostics
+    /// reports, and it is deliberately conservative -- no reply means
+    /// "not known to be ready", never an optimistic guess.
+    pub async fn capabilities(&self) -> Result<Capabilities> {
+        let mut s = UnixStream::connect(&self.socket)
+            .await
+            .with_context(|| format!("connect worker at {}", self.socket.display()))?;
+        s.write_all(b"{\"op\":\"capabilities\",\"id\":\"c\"}\n")
+            .await?;
+        s.flush().await?;
+
+        let (rd, _w) = s.into_split();
+        let mut lines = BufReader::new(rd).lines();
+        // Generous relative to a local socket: the reply is already
+        // computed, but a loaded machine can take a moment to schedule it.
+        let deadline = Duration::from_millis(3000);
+        while let Ok(Ok(Some(line))) = timeout(deadline, lines.next_line()).await {
+            let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if ev.get("ev").and_then(|v| v.as_str()) != Some("capabilities") {
+                continue;
+            }
+            return Ok(serde_json::from_value(ev).unwrap_or_default());
+        }
+        Err(anyhow!("worker did not report capabilities"))
     }
 }
 

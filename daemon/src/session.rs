@@ -17,7 +17,7 @@ use crate::store::Store;
 use crate::worker::{Progress, Worker};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanState {
@@ -79,6 +79,7 @@ pub struct Engine {
     pub audit: Arc<Audit>,
     /// Broadcast of (state, progress, reason) for the shell pill.
     pub state_tx: mpsc::Sender<(ScanState, f32, String)>,
+    pub scan_slots: Arc<Semaphore>,
 }
 
 impl Engine {
@@ -91,18 +92,28 @@ impl Engine {
         let t0 = Instant::now();
         let no_cues: Vec<String> = Vec::new();
 
-        let note_f32 = |notes: &Option<&serde_json::Map<String, serde_json::Value>>,
-                        key: &str| {
+        let note_f32 = |notes: &Option<&serde_json::Map<String, serde_json::Value>>, key: &str| {
             notes
                 .and_then(|m| m.get(key))
                 .and_then(|v| v.as_f64())
                 .map(|v| v as f32)
         };
 
-        let log = |result: &str, reason: &str, cues: &[String], strict: &str,
+        // `spectrum` and `luma` are "&str"/Option borrowed from a local,
+        // so they are resolved per call below rather than captured here:
+        // before a scan runs there is no evidence to report. Empty means
+        // "a decision was not reached" and the field is then omitted.
+        let log = |result: &str,
+                   reason: &str,
+                   cues: &[String],
+                   strict: &str,
                    notes: Option<&serde_json::Map<String, serde_json::Value>>,
-                   valid: u64| {
+                   valid: u64,
+                   spectrum: &str,
+                   luma: Option<f32>| {
             self.audit.log(Event {
+                spectrum,
+                luma,
                 ts: 0,
                 uid,
                 service,
@@ -115,10 +126,23 @@ impl Engine {
                 moire_threshold: note_f32(&notes, "moire_threshold"),
                 valid_frames: (valid > 0).then_some(valid),
             });
+            // Opt-in timeline: lock/unlock only, never sudo/polkit.
+            // "success"/"failure" for real attempts, "refused"/"unavailable"
+            // pass through so the JSON shows when the machine opened.
+            self.audit.timeline(uid, service, result);
         };
 
         if !cfg.enabled {
-            log("refused", "disabled", &no_cues, cfg.strictness.as_str(), None, 0);
+            log(
+                "refused",
+                "disabled",
+                &no_cues,
+                cfg.strictness.as_str(),
+                None,
+                0,
+                "unknown",
+                None,
+            );
             return AuthOutcome::unavailable(Verdict::Disabled.user_message());
         }
         if !cfg.service_allowed(service) {
@@ -129,16 +153,57 @@ impl Engine {
                 cfg.strictness.as_str(),
                 None,
                 0,
+                "unknown",
+                None,
             );
             return AuthOutcome::unavailable(Verdict::ServiceNotAllowed.user_message());
+        }
+        // Guest / excluded users fall through to password before the
+        // camera ever opens. Lookup is best-effort: an unresolvable uid
+        // is never excluded (fail open to normal flow, fail closed at
+        // match time as usual).
+        if !cfg.exclude_users.is_empty() {
+            let name = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                .ok()
+                .flatten()
+                .map(|u| u.name);
+            if name
+                .as_deref()
+                .is_some_and(|n| cfg.exclude_users.iter().any(|e| e == n))
+            {
+                log(
+                    "refused",
+                    "user_excluded",
+                    &no_cues,
+                    cfg.strictness.as_str(),
+                    None,
+                    0,
+                    "unknown",
+                    None,
+                );
+                return AuthOutcome::unavailable(Verdict::Disabled.user_message());
+            }
         }
         {
             let mut pol = self.policy.lock().await;
             if pol.check(uid, cfg.max_failures) == Verdict::LockedOut {
-                log("refused", "locked_out", &no_cues, cfg.strictness.as_str(), None, 0);
+                log(
+                    "refused",
+                    "locked_out",
+                    &no_cues,
+                    cfg.strictness.as_str(),
+                    None,
+                    0,
+                    "unknown",
+                    None,
+                );
                 return AuthOutcome::deny(Verdict::LockedOut.user_message());
             }
         }
+        let _scan_permit = match self.scan_slots.acquire().await {
+            Ok(permit) => permit,
+            Err(_) => return AuthOutcome::unavailable("Face scan is unavailable"),
+        };
 
         self.emit(ScanState::Waking, 0.0, "").await;
 
@@ -156,7 +221,7 @@ impl Engine {
         });
 
         self.emit(ScanState::Searching, 0.05, "").await;
-        let sid = format!("{uid}-{}", t0.elapsed().as_nanos());
+        let sid = format!("{uid}-{}-{}", std::process::id(), t0.elapsed().as_nanos());
         let evidence = self
             .worker
             .scan(
@@ -169,6 +234,7 @@ impl Engine {
                 None,
                 cfg.ir_camera.clone(),
                 None,
+                Some(cfg.camera.clone()),
             )
             .await;
         pump.abort();
@@ -179,9 +245,13 @@ impl Engine {
                 let reason = e.to_string();
                 // A broken camera or a dead worker must fall through to
                 // the password, never count as a failed attempt.
-                let unavailable = reason.contains("camera")
-                    || reason.contains("connect worker")
-                    || reason.contains("closed the connection");
+                // Case-insensitive: worker sends "camera_unavailable".
+                let lower = reason.to_lowercase();
+                let unavailable = lower.contains("camera")
+                    || lower.contains("connect worker")
+                    || lower.contains("closed the connection")
+                    || lower.contains("no such file")
+                    || lower.contains("connection refused");
                 let state = if unavailable {
                     ScanState::CameraError
                 } else {
@@ -199,6 +269,8 @@ impl Engine {
                     cfg.strictness.as_str(),
                     None,
                     0,
+                    "unknown",
+                    None,
                 );
                 return if unavailable {
                     AuthOutcome::unavailable("Camera unavailable")
@@ -231,20 +303,39 @@ impl Engine {
                 strict.as_str(),
                 Some(&ev.liveness.notes),
                 ev.usable,
+                ev.spectrum.as_str(),
+                ev.luma,
             );
             return AuthOutcome::unavailable(Verdict::NoIdentities.user_message());
         }
         // Templates carry no name, so build a parallel name index that
         // maps the best template back to the identity it enrolled under.
-        let templates: Vec<Vec<f32>> = identities
-            .iter()
-            .flat_map(|i| i.templates.iter().cloned())
-            .collect();
-        let names: Vec<String> = identities
-            .iter()
-            .flat_map(|i| (0..i.templates.len()).map(move |_| i.name.clone()))
-            .collect();
-        let m = vote(&ev.embeddings, &templates, cfg.tau, cfg.vote_k, cfg.vote_n);
+        // Spectrum gate: in auto mode the worker resolved rgb/ir per
+        // scan; only same-spectrum templates (plus legacy ANY) vote.
+        // Empty query spectrum (legacy worker) matches everything.
+        let qtag = crate::store::spectrum_tag(&ev.spectrum);
+        let mut templates: Vec<Vec<f32>> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for ident in &identities {
+            for (ix, t) in ident.templates.iter().enumerate() {
+                let tag = ident.spectrum_at(ix);
+                if qtag != crate::store::SPECTRUM_ANY
+                    && tag != crate::store::SPECTRUM_ANY
+                    && tag != qtag
+                {
+                    continue;
+                }
+                templates.push(t.clone());
+                names.push(ident.name.clone());
+            }
+        }
+        let m = if templates.is_empty() {
+            // No same-spectrum reference: report as no-match with a
+            // re-enroll flavour downstream (reason carries counts).
+            vote(&ev.embeddings, &[], cfg.tau, cfg.vote_k, cfg.vote_n)
+        } else {
+            vote(&ev.embeddings, &templates, cfg.tau, cfg.vote_k, cfg.vote_n)
+        };
 
         if m.accepted && liveness_ok {
             self.policy.lock().await.record_success(uid);
@@ -262,6 +353,8 @@ impl Engine {
                 strict.as_str(),
                 Some(&ev.liveness.notes),
                 ev.usable,
+                ev.spectrum.as_str(),
+                ev.luma,
             );
             return AuthOutcome {
                 success: true,
@@ -274,6 +367,8 @@ impl Engine {
             format!("liveness_deny:{}", ev.liveness.deny.join("+"))
         } else if !liveness_ok {
             "liveness_unconfirmed".to_string()
+        } else if templates.is_empty() {
+            format!("no_match:no_{}_templates_reenroll_needed", ev.spectrum)
         } else {
             format!("no_match:{}of{}", m.passes, m.considered)
         };
@@ -290,6 +385,8 @@ impl Engine {
             strict.as_str(),
             Some(&ev.liveness.notes),
             ev.usable,
+            ev.spectrum.as_str(),
+            ev.luma,
         );
 
         // The user is told it failed, not why. Cue detail goes to the

@@ -34,7 +34,23 @@ case "$1" in
 
     # --- default config ----------------------------------------------
     if [ ! -f /etc/faceid-nim/config.toml ]; then
-      cat > /etc/faceid-nim/config.toml <<'CFG'
+      # Detect the cameras before writing the config, so a fresh install
+      # has a working camera with nothing asked of the user. The probe
+      # prints `key = "value"` lines for the devices it actually found;
+      # if it fails or finds nothing, we fall back to the documented
+      # /dev/video0 default and the app re-resolves on first run.
+      CAM_LINES=""
+      if [ -x "$LIBEXEC/venv/bin/python3" ]; then
+        CAM_LINES="$("$LIBEXEC/venv/bin/python3" -m faceid_vision.cameras \
+                      --config-lines 2>/dev/null || true)"
+      fi
+      if [ -z "$CAM_LINES" ]; then
+        CAM_LINES='camera = "/dev/video0"'
+        echo "faceid-nim: could not auto-detect a camera; defaulting to"
+        echo "            /dev/video0. The app will re-detect on first run."
+      fi
+
+      cat > /etc/faceid-nim/config.toml <<CFG
 # faceid-nim configuration.
 #
 # Face unlock is OFF until you turn it on in the Face Unlock app.
@@ -45,8 +61,11 @@ enabled = false
 #   heavy: additionally requires positive evidence of a real 3D face
 strictness = "light"
 
-# rgb | ir | both
-mode = "rgb"
+# rgb | ir | both | hybrid | auto
+#   auto: measure the room light per scan and pick the sensor (dark -> IR,
+#         lit -> RGB). Needs a second, infrared template set, which
+#         enrollment collects for you when both sensors exist.
+mode = "auto"
 
 # There is no correct universal threshold. Measure yours with
 # eval/far_frr.py and replace this before trusting an unlock.
@@ -61,7 +80,9 @@ max_failures = 5
 lockout_secs = 60
 require_attention = true
 
-camera = "/dev/video0"
+# Cameras detected at install time. The app re-detects and can override
+# these at any time.
+$CAM_LINES
 
 # The worker binds inside its own runtime subdirectory, which is the
 # only place it is allowed to write.
@@ -74,32 +95,99 @@ CFG
     # --- models ------------------------------------------------------
     # Model files are not shipped in the .deb: their licenses differ
     # from the code's, and some are non-commercial research use only.
-    if [ -x "$LIBEXEC/verify-models" ]; then
-      if ! "$LIBEXEC/verify-models" --quiet; then
-        echo "faceid-nim: face recognition models are missing or unverified."
-        echo "            Run:  sudo faceid-nim fetch-models"
-        echo "            Until then the vision worker will refuse to start,"
-        echo "            and face unlock simply will not be offered."
-      fi
+    #
+    # We FETCH them here rather than printing an instruction to run a
+    # command. A package that installs into a state where the feature
+    # cannot work, and then tells the user to fix it, is not installed.
+    #
+    # Every failure below is non-fatal by design: a laptop with no
+    # network at install time must still finish booting, and
+    # faceid-nim-fetch-models.service retries on every boot until the
+    # models land. Face unlock degrades to "unavailable" meanwhile; it
+    # must never be able to lock anyone out.
+    MODELS_OK=0
+    if [ -x "$LIBEXEC/verify-models" ] && [ -x "$LIBEXEC/fetch-models" ]; then
+        if "$LIBEXEC/verify-models" --quiet; then
+            MODELS_OK=1
+        else
+            echo "faceid-nim: fetching face recognition models..."
+            if "$LIBEXEC/fetch-models" >/dev/null 2>&1; then
+                MODELS_OK=1
+            else
+                echo "faceid-nim: could not download the models."
+                echo "            This is usually no network at install time."
+                echo "            Retrying automatically on every boot; you can"
+                echo "            also run:  sudo faceid-nim fetch-models"
+            fi
+        fi
     fi
+
+    # Report the real state, not a to-do list. Liveness features that
+    # are not running are named as such: a build whose blink/planarity
+    # checks silently did nothing was exactly the failure this wording
+    # exists to prevent.
+    if [ "$MODELS_OK" -eq 1 ]; then
+        MODELS_LINE="models    : ready"
+    else
+        MODELS_LINE="models    : NOT INSTALLED yet (retrying on boot)"
+    fi
+
+    LIVE=""
+    if [ -f /var/lib/faceid-nim/models/face_landmarker.task ]; then
+        LIVE="landmarks : blink / 3D / attention checks active"
+    else
+        LIVE="landmarks : unavailable (heavy strictness cannot be satisfied)"
+    fi
+    ANTI="anti-spoof: no ML model (screen/print/IR cues still active)"
+    if [ -f /var/lib/faceid-nim/models/minifasnet_v2.onnx ]; then
+        ANTI="anti-spoof: active"
+    fi
+
+    # --- accelerator --------------------------------------------------
+    if [ -e /dev/dri/renderD128 ] || [ -e /dev/nvidia0 ] || [ -e /dev/kfd ]; then
+        ACCEL="device   : GPU device present"
+    else
+        ACCEL="device   : CPU only"
+    fi
+
+    # --- camera ------------------------------------------------------
+    CAM_LINE="camera   : not probed yet (the app detects it on first run)"
+    for n in 0 1 2 3 4 5 6 7; do
+        if [ -e "/dev/video$n" ]; then
+            CAM_LINE="camera   : /dev/video$n present (the app picks RGB/IR)"
+            break
+        fi
+    done
+
+    # --- GPU sandbox -------------------------------------------------
+    # Only widens the worker's device access when hardware is actually
+    # present. See packaging/scripts/gpu-devices.
+    [ -x "$LIBEXEC/gpu-devices" ] && "$LIBEXEC/gpu-devices" >/dev/null 2>&1 || true
 
     # --- source-install fallback -------------------------------------
     # `make install` puts the same files in the same places but does not
     # run this script, so tolerate a layout that is already correct.
     if [ ! -x "$LIBEXEC/faceid-nimd" ]; then
-      echo "faceid-nim: warning, $LIBEXEC/faceid-nimd not found."
-      echo "            If you installed from source, run 'sudo make install'."
+        echo "faceid-nim: warning, $LIBEXEC/faceid-nimd not found."
+        echo "            If you installed from source, run 'sudo make install'."
     fi
 
     # --- GTK app plumbing --------------------------------------------
     if command -v glib-compile-schemas >/dev/null 2>&1; then
-      glib-compile-schemas /usr/share/glib-2.0/schemas || true
+        glib-compile-schemas /usr/share/glib-2.0/schemas || true
+    else
+        # The gschema is installed but uncompiled without this package.
+        # The app does not read it (it keeps prefs in its own JSON), so
+        # this is cosmetic -- say so rather than failing silently.
+        echo "faceid-nim: note: glib-compile-schemas not found; the GSettings"
+        echo "            schema is installed but not compiled. Install"
+        echo "            libglib2.0-bin if anything else reads it."
     fi
     if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-      gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
+        gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
     fi
     if command -v update-desktop-database >/dev/null 2>&1; then
-      update-desktop-database -q /usr/share/applications || true
+        update-desktop-database -q /usr/share/applications || true
     fi
 
     # --- PAM ----------------------------------------------------------
@@ -109,16 +197,22 @@ CFG
 
     # --- services -----------------------------------------------------
     systemctl daemon-reload || true
+    systemctl enable --now faceid-nim-fetch-models.service || true
     systemctl enable --now faceid-nimd.service || true
     systemctl enable --now faceid-vision.service || true
 
-    cat <<'MSG'
+    cat <<MSG
 
 faceid-nim installed. Face unlock is DISABLED.
 
-  1. sudo faceid-nim fetch-models     (downloads and verifies the models)
-  2. Open "Face Unlock", enroll, then enable it there.
-  3. On Wayland, log out and back in once so GNOME loads the extension.
+  $MODELS_LINE
+  $LIVE
+  $ANTI
+  $ACCEL
+  $CAM_LINE
+
+Next: open "Face Unlock", enroll, then enable it there.
+On Wayland, log out and back in once so GNOME loads the lock-screen pill.
 
 Check state any time with:  faceid-nim status
 Your password always works.

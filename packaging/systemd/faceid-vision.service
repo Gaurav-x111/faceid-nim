@@ -13,10 +13,12 @@ Group=faceid
 SupplementaryGroups=video
 ExecStart=/usr/libexec/faceid-nim/venv/bin/python3 -m faceid_vision \
           --socket /run/faceid-nim/worker/vision.sock \
-          --device /dev/video1 \
-          --ir-device /dev/video3 \
           --model-dir /var/lib/faceid-nim/models \
           --manifest /usr/share/faceid-nim/models/manifest.toml
+# Note: no --device/--ir-device here. The primary camera comes from the
+# daemon config (/etc/faceid-nim/config.toml camera/ir_camera) and the
+# per-scan ir_device request field. Hardcoding /dev/videoN here used the
+# wrong camera on single-cam and multi-cam machines.
 Restart=always
 RestartSec=2s
 

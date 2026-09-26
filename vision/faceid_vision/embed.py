@@ -20,19 +20,27 @@ class Embedder:
                  mean: tuple[float, float, float] = (127.5, 127.5, 127.5),
                  swap_rb: bool = True,
                  providers: list[str] | None = None):
-        import onnxruntime as ort  # imported lazily so tests can run without it
+        # Session construction (provider choice + thread sizing) lives in
+        # rt.session(), so the recognizer and the anti-spoof model can no
+        # longer drift apart. `providers` still overrides, for tests and
+        # for anyone who knows better than the hardware probe.
+        from . import rt
 
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = 2          # a scan is latency-bound, not throughput-bound
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.sess = ort.InferenceSession(
-            str(model_path), sess_options=so,
-            providers=providers or ["CPUExecutionProvider"])
-        self.input_name = self.sess.get_inputs()[0].name
-        shape = self.sess.get_inputs()[0].shape
+        self._sess = rt.session(model_path, providers=providers)
+        self.input_name = self._sess.get_inputs()[0].name
+        shape = self._sess.get_inputs()[0].shape
         self.size = (int(shape[3]), int(shape[2])) if len(shape) == 4 else (112, 112)
         self.model_id = model_id
         self.scale, self.mean, self.swap_rb = scale, mean, swap_rb
+
+    @property
+    def sess(self):
+        return self._sess
+
+    @property
+    def providers(self) -> list[str]:
+        """Execution providers actually in use, not the ones requested."""
+        return list(self._sess.get_providers())
 
     @property
     def dim(self) -> int:

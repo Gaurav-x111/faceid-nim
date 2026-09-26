@@ -1,7 +1,8 @@
 /* opening.js -- the "Opening" animation engine.
  *
- * A small, declarative splash shown while the capsule grows at the start
- * of every scan.  Users pick a variant -- or make their own -- from the
+ * A small, declarative splash shown at the start of every scan, played
+ * inside the centred Face ID HUD.  Users pick a variant -- or make their
+ * own -- from the
  * faceid-nim settings app; the choice lives in
  * ~/.config/faceid-nim/openings.json next to any custom logo asset the
  * user copied in.  The shell extension only *reads* that file; the app
@@ -12,8 +13,10 @@
  * optional raster/SVG logo.  A downloaded "animation" can repaint this
  * one capsule and nothing else -- it can never execute in the shell.
  *
- * Built-in variants are 'logo' (the current default), 'glow' (a soft
- * halo, for people who find a logo busy) and 'none' (skip the splash).
+ * Built-in variants are 'glance' (the default video-pill opening,
+ * spring pill + unlock videos from linux-anim), 'logo' (the classic
+ * app-logo fade), 'glow' (a soft halo, for people who find a logo
+ * busy) and 'none' (skip the splash).
  * Custom variants share the same schema the app's editor writes:
  *
  *   {
@@ -39,6 +42,30 @@ const OPENINGS_DIR = GLib.build_filenamev([
     GLib.get_home_dir(), '.config', 'faceid-nim', 'openings']);
 const CONFIG_PATH = GLib.build_filenamev([
     GLib.get_home_dir(), '.config', 'faceid-nim', 'openings.json']);
+const APP_JSON = GLib.build_filenamev([
+    GLib.get_home_dir(), '.config', 'faceid-nim', 'app.json']);
+
+// User-facing animation on/off (Face Unlock app → Opening → Play
+// animations). Read live on every scan so the toggle applies at the
+// next lock with no reload. Missing file or bad JSON = animations on
+// (today's behaviour); the app writes animations_enabled: false.
+export function animationsEnabled() {
+    try {
+        const file = Gio.File.new_for_path(APP_JSON);
+        if (!file.query_exists(null))
+            return true;
+        const [ok, bytes] = file.load_contents(null);
+        if (!ok)
+            return true;
+        const data = JSON.parse(new TextDecoder().decode(bytes));
+        if (!data || typeof data !== 'object' ||
+            !('animations_enabled' in data))
+            return true;
+        return data.animations_enabled !== false;
+    } catch (e) {
+        return true;
+    }
+}
 
 const LOGO_SIZE = 36;
 const RING_SIZE = 48;       // fits the pill's 48px height
@@ -63,6 +90,13 @@ const EASINGS = { outCubic: easeOutCubic, outBack: easeOutBack,
                   outExpo: easeOutExpo };
 
 const BUILTIN = {
+    glance: {
+        kind: 'builtin', name: 'Glance Video Pill',
+        description: 'Spring pill with unlock videos (linux-anim) — the default.',
+        logo: BUILTIN_LOGO_URL, text: 'Looking for your face…',
+        bg: '', accent: '#9ad0ff', ease: 'outBack', fade_ms: 600,
+        scale: true, ring: false,
+    },
     logo: {
         kind: 'builtin', name: 'App Logo',
         description: 'The Face Unlock logo fades in as the capsule grows.',
@@ -86,7 +120,7 @@ const BUILTIN = {
 };
 
 function _readConfig() {
-    const fallback = { active: 'logo', variants: {}, scan_face: 'arena' };
+    const fallback = { active: 'glance', variants: {}, scan_face: 'apple' };
     try {
         const file = Gio.File.new_for_path(CONFIG_PATH);
         if (!file.query_exists(null))
@@ -97,12 +131,12 @@ function _readConfig() {
         const data = JSON.parse(new TextDecoder().decode(bytes));
         if (!data || typeof data !== 'object')
             return fallback;
-        const face = String(data.scan_face || 'arena');
+        const face = String(data.scan_face || 'apple');
         return {
-            active: String(data.active || 'logo'),
+            active: String(data.active || 'glance'),
             variants: data.variants && typeof data.variants === 'object'
                 ? data.variants : {},
-            scan_face: (face === 'classic') ? 'classic' : 'arena',
+            scan_face: (face === 'classic' || face === 'arena') ? face : 'apple',
         };
     } catch (e) {
         logError(e, 'faceid@nim: opening config');
@@ -186,25 +220,25 @@ export class OpeningScene {
     // no extension reload.
     load() {
         const cfg = _readConfig();
-        const id = cfg.variants[cfg.active] ? cfg.active : 'logo';
+        const id = cfg.variants[cfg.active] || BUILTIN[cfg.active] ? cfg.active : 'glance';
         this._spec = _specFor(cfg, id);
         this._fadeMs = Math.max(1, this._spec.fade_ms);
         this._id = id;
-        this._scanFace = cfg.scan_face || 'arena';
+        this._scanFace = cfg.scan_face || 'apple';
         return this;
     }
 
     id() {
-        return this._id || 'logo';
+        return this._id || 'glance';
     }
 
-    // 'arena' (default premium scanner) or 'classic' (original sweep).
+    // 'apple' (default iPhone-like) | 'arena' (premium) | 'classic'.
     scanFace() {
-        return this._scanFace || 'arena';
+        return this._scanFace || 'apple';
     }
 
     name() {
-        return this._spec ? this._spec.name : 'App Logo';
+        return this._spec ? this._spec.name : 'Glance Video Pill';
     }
 
     // How long the splash lasts before the pill may hand off to the
@@ -246,12 +280,10 @@ export class OpeningScene {
         }
 
         if (s.text != null)
-            pill._setLabel('face-id', s.text);
+            pill._setLabel(s.text || '');
 
-        // Colour the capsule while it opens; restore when we hand off.
-        const bg = s.bg ? `background-color: ${s.bg}E6;` : '';
-        const border = s.accent ? `border-color: ${s.accent}59;` : '';
-        pill.style = `${bg}${border}`.trim() || null;
+        // The HUD stays a clean transparent square; only the status line
+        // and logo pick up the accent while the splash plays.
         pill._label.style = s.accent ? `color: ${s.accent};` : null;
     }
 

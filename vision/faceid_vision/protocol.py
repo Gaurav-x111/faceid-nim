@@ -54,6 +54,10 @@ def validate_request(msg: dict[str, Any]) -> dict[str, Any]:
         t = msg.get("timeout_ms", 4000)
         if not isinstance(t, int) or not (200 <= t <= 60000):
             raise ProtocolError("timeout_ms out of range")
+        if "strict" in msg and msg["strict"] not in ("off", "light", "heavy"):
+            raise ProtocolError(f"unknown strict {msg['strict']!r}")
+        if "mode" in msg and msg["mode"] not in ("rgb", "ir", "both", "hybrid", "auto"):
+            raise ProtocolError(f"unknown mode {msg['mode']!r}")
     return msg
 
 
@@ -80,11 +84,22 @@ def ev_challenge(sid: str, prompt: str) -> dict:return {"id": sid, "ev": "challe
 def ev_error(sid: str, reason: str) -> dict:   return {"id": sid, "ev": "error", "reason": reason}
 
 def ev_done(sid: str, embeddings, model_id: str, liveness: dict,
-            frames: int, usable: int, elapsed_ms: int) -> dict:
-    return {
+            frames: int, usable: int, elapsed_ms: int,
+            spectrum: str = "", luma: float | None = None) -> dict:
+    out = {
         "id": sid, "ev": "done",
         "embeddings": [[round(float(x), 6) for x in e] for e in embeddings],
         "model_id": model_id,
         "liveness": liveness,
         "stats": {"frames": frames, "usable": usable, "elapsed_ms": elapsed_ms},
     }
+    # Spectrum the recognition embeddings were captured in ("rgb"/"ir").
+    # Empty means legacy / unknown: daemon matches against all templates.
+    if spectrum:
+        out["spectrum"] = spectrum
+    if luma is not None:
+        try:
+            out["luma"] = round(float(luma), 1)
+        except (TypeError, ValueError):
+            pass
+    return out

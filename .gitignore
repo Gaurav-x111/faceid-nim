@@ -8,3 +8,13 @@ eval/out/
 eval/data/
 .venv/
 .vscode/
+_archive/
+vision/build/
+vision/*.egg-info/
+packaging/debian/.debhelper/
+packaging/debian/cargo-home/
+packaging/debian/faceid-nim/
+packaging/debian/debhelper-build-stamp
+packaging/debian/files
+packaging/debian/*.debhelper*
+packaging/debian/*.substvars

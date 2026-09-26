@@ -16,7 +16,7 @@ pam:
 
 test:
 	cd daemon && cargo test
-	cd vision && python3 -m pytest -q tests
+	PYTHONPATH=vision:app python3 -m pytest -q vision/tests app/tests
 
 install: all
 	install -d $(DESTDIR)$(LIBEXEC) $(DESTDIR)$(SECURITYDIR)
@@ -34,19 +34,38 @@ install: all
 	install -m 0644 packaging/polkit/*.policy $(DESTDIR)/usr/share/polkit-1/actions/
 	install -d $(DESTDIR)/usr/share/pam-configs
 	install -m 0644 packaging/pam-configs/faceid-nim $(DESTDIR)/usr/share/pam-configs/
-	# Bundled venv so users never run pip.
+	# Bundled venv so users never run pip. The liveness extra is best
+	# effort: mediapipe ships no arm64 wheel, and a hard failure here
+	# would mean no package at all on every ARM laptop. The worker
+	# degrades to "landmarks unavailable" and says so in `faceid-nim
+	# status` and in the app, which is the honest outcome.
 	python3 -m venv $(DESTDIR)$(LIBEXEC)/venv
-	$(DESTDIR)$(LIBEXEC)/venv/bin/pip install --no-cache-dir ./vision
+	rm -rf vision/build vision/*.egg-info
+	$(DESTDIR)$(LIBEXEC)/venv/bin/pip install --no-cache-dir './vision[liveness]' \
+	    || $(DESTDIR)$(LIBEXEC)/venv/bin/pip install --no-cache-dir './vision'
 	# Settings GUI + launcher. The wrapper runs the app on the system
 	# python (the venv above is for the worker only and has no GTK).
 	install -d $(DESTDIR)$(PREFIX)/share/faceid-nim/app/faceid_app
 	cp -r app/faceid_app/. $(DESTDIR)$(PREFIX)/share/faceid-nim/app/faceid_app/
+	# Glance video-pill preview harness (Opening page -> Preview video pill).
+	install -d $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim
+	cp -r linux-anim/glance_anim linux-anim/test_anim.py linux-anim/run.sh linux-anim/README.md $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim/
+	rm -rf $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim/glance_anim/__pycache__
 	install -m 0755 packaging/faceid-app $(DESTDIR)/usr/bin/faceid-app
+	install -m 0755 packaging/scripts/gpu-devices $(DESTDIR)$(LIBEXEC)/
 	install -d $(DESTDIR)$(PREFIX)/share/applications
 	install -m 0644 app/data/org.faceidnim.App.desktop $(DESTDIR)$(PREFIX)/share/applications/
 
+# DEB_FLAGS exists because Build-Depends lists `cargo` and `rustc`, and
+# the only way to get a toolchain new enough for the daemon is rustup --
+# which does NOT install dpkg packages. dpkg-checkbuilddeps therefore
+# fails on every machine (including a stock CI runner) even though cargo
+# is present and working. Pass DEB_FLAGS=-d there. Leave it empty
+# locally, where you want the real check.
+DEB_FLAGS ?=
+
 deb:
-	dpkg-buildpackage -us -uc -b
+	dpkg-buildpackage -us -uc -b $(DEB_FLAGS)
 	mkdir -p dist && mv ../faceid-nim_*.deb dist/ 2>/dev/null || true
 
 # Install the extension for the current user and watch the shell log.

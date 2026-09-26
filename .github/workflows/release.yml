@@ -5,14 +5,41 @@ on:
 
 jobs:
   deb:
-    # Built on 24.04 so the binaries run on 24.04 and newer.
-    runs-on: ubuntu-24.04
+    # Built on 22.04 (jammy) so one artifact installs on 22.04 and newer,
+    # including noble. A 24.04 build would refuse older systems on glibc.
+    # Matrix mirrors ci.yml: the daemon is a compiled binary, so each arch
+    # builds natively on its own runner (mediapipe absence on arm64 is
+    # already tolerated by debian/rules).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y
               libpam0g-dev meson ninja-build python3-venv devscripts debhelper
-      - run: make deb
+              build-essential
+      # The daemon needs rustc >= 1.75, which jammy's apt rustc (1.59) is
+      # not, and rustup does not register dpkg packages -- so
+      # dpkg-checkbuilddeps can never be satisfied here. Install the
+      # toolchain the honest way and skip the (meaningless) check.
+      - name: Install a current Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Verify the toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo --version | grep -q . || { echo "no cargo on PATH"; exit 1; }
+      - run: make deb DEB_FLAGS=-d
       - name: Checksums
         run: |
           cd dist

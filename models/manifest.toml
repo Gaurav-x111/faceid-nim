@@ -2,9 +2,11 @@
 # load a file whose hash does not match, because a swapped recognition
 # model is a silent authentication bypass.
 #
-# IMPORTANT, AND UNRESOLVED: the sha256 values below are PLACEHOLDERS.
-# Fill them in from the files you actually download, and read each
-# license before bundling anything in a public .deb.
+# `optional = true` means: absent is survivable. The worker logs the
+# reason loudly, the features that need it report "unavailable", and face
+# unlock keeps working with reduced liveness. The detector and the
+# recognizer are never optional -- without them there is no face unlock,
+# so they are simply required.
 #
 # Known licensing situation as far as I can tell (verify it yourself,
 # this is not legal advice):
@@ -12,8 +14,12 @@
 #   - InsightFace pretrained ArcFace models: restricted to
 #     non-commercial research use. Do NOT put them in a public package
 #     without checking.
-#   - MediaPipe Face Mesh: Apache-2.0 code, but check the model card.
+#   - MediaPipe Face Landmarker bundle: Apache-2.0, safe to fetch.
 #   - Silent-Face-Anti-Spoofing MiniFASNet: check the repository terms.
+#     The `antispoof` entry below is still UNPINNED, so it is never
+#     loaded and the `antispoof_model` deny cue never fires. That is
+#     deliberate and reported honestly in `faceid-nim status` rather
+#     than papered over.
 
 [model.detector]
 file = "face_detection_yunet_2023mar.onnx"
@@ -41,8 +47,35 @@ file = "minifasnet_v2.onnx"
 # time (build_engine already treats a missing/refused antispoof as
 # spoof-path=None). Fetch or convert it separately, then pin its hash
 # here. Leave it out of pinning until you have the exact artifact.
+#
+# While it stays unpinned: resolve_optional() refuses to load it, the
+# `antispoof_model` deny cue never fires, and status reports the passive
+# ML anti-spoof check as unavailable. Do not advertise it as running.
 url = ""
 sha256 = ""
 license = "verify before shipping"
 model_id = "minifasnet_v2"
 input_size = [80, 80]
+optional = true
+
+[model.landmarks]
+# Dense face landmarks for the liveness cues that need more than YuNet's
+# five points: blink (EAR), planarity/parallax, challenge-response and
+# the attention check.
+#
+# This is the model that makes those checks real. Without it they report
+# "unknown" and `strictness = heavy` can never be satisfied -- which is
+# exactly the failure this entry fixes. Previously the code asked
+# mediapipe for `mp.solutions.face_mesh`, an API the current wheel no
+# longer ships, and the resulting AttributeError was swallowed into a
+# silent "unavailable".
+#
+# Apache-2.0. Pinned from the official MediaPipe model bucket; the same
+# bundle the Tasks API expects, in the canonical 478-point Face Mesh
+# ordering that blink.py/geometry.py already index.
+file = "face_landmarker.task"
+url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+sha256 = "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
+license = "Apache-2.0"
+model_id = "face_landmarker_2025"
+optional = true

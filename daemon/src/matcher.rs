@@ -12,9 +12,11 @@ pub struct MatchOutcome {
     /// Lets the caller attribute a match to a named identity without
     /// leaking the score itself.
     pub best_index: Option<usize>,
-    /// Kept for the audit log and for tuning. Never returned to a
-    /// caller: leaking scores lets an attacker hill-climb toward the
-    /// threshold one attempt at a time.
+    /// Best raw score. Never returned to a caller, never written to the
+    /// audit log: leaking scores lets an attacker hill-climb toward the
+    /// threshold one attempt at a time. It currently reaches exactly one
+    /// place, a `tracing::debug!` in session.rs, which is root-only and
+    /// off by default.
     pub best: f32,
 }
 

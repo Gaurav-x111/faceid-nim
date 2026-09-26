@@ -137,6 +137,23 @@ static int read_reply(int fd, char *buf, size_t bufsz, size_t *len,
     }
 }
 
+static int write_all(int fd, const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, buf, len);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        buf += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
 /* Escape the few characters that would break our one-line JSON. Users
  * and services cannot normally contain them, but a PAM module must not
  * assume that. */
@@ -205,7 +222,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         close(fd);
         return PAM_AUTHINFO_UNAVAIL;
     }
-    if (write(fd, req, strlen(req)) < 0) {
+    if (write_all(fd, req, strlen(req)) < 0) {
         close(fd);
         return PAM_AUTHINFO_UNAVAIL;
     }

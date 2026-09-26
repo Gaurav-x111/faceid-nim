@@ -1,0 +1,82 @@
+#!/bin/sh
+# ir-emitter -- probe and enable the IR emitter for faceid-nim.
+#
+# Most IR cameras need a vendor-specific UVC command to turn the emitter
+# on; see the linux-enable-ir-emitter project (Suggested by the .deb).
+# This helper never fails hard: without an emitter the daemon simply
+# uses passive IR cues (analyse_ir_face), which is weaker but safe.
+#
+# Installed as /usr/libexec/faceid-nim/ir-emitter.
+# Usage: ir-emitter [--probe|--enable|--status]
+set -eu
+
+MODE="${1:---probe}"
+
+probe() {
+    echo "IR emitter probe"
+    echo "================"
+    if command -v linux-enable-ir-emitter >/dev/null 2>&1; then
+        echo "  tool: linux-enable-ir-emitter found"
+        linux-enable-ir-emitter --help 2>&1 | head -n 5 || true
+    else
+        echo "  tool: linux-enable-ir-emitter NOT installed"
+        echo "        sudo apt install linux-enable-ir-emitter (see Suggests)"
+    fi
+    echo
+    echo "Video nodes:"
+    for dev in /dev/video*; do
+        [ -c "$dev" ] || continue
+        if command -v v4l2-ctl >/dev/null 2>&1; then
+            card="$(v4l2-ctl -d "$dev" --info 2>/dev/null | grep 'Card type' | cut -d: -f2 | xargs || echo unknown)"
+            if v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null | grep -q GREY; then
+                echo "  $dev: IR-capable? ($card)"
+            else
+                echo "  $dev: RGB ($card)"
+            fi
+        else
+            echo "  $dev (install v4l-utils for classification)"
+        fi
+    done
+    echo
+    if [ -r /sys/bus/usb/devices ] && ls /sys/bus/usb/devices/*/product 1>/dev/null 2>&1; then
+        echo "USB cameras:"
+        for p in /sys/bus/usb/devices/*/product; do
+            echo "  $(cat "$p" 2>/dev/null || echo unknown)"
+        done
+    fi
+}
+
+enable() {
+    need_root_enable
+    if command -v linux-enable-ir-emitter >/dev/null 2>&1; then
+        echo "Enabling IR emitter (one-shot; re-run after reboot if needed)..."
+        linux-enable-ir-emitter run "$@" || {
+            echo "ir-emitter: enable failed; passive IR still works" >&2
+            exit 1
+        }
+        echo "IR emitter enable attempted. Verify with: sudo faceid-nim ir-emitter --probe"
+    else
+        echo "ir-emitter: linux-enable-ir-emitter not installed." >&2
+        echo "  sudo apt install linux-enable-ir-emitter" >&2
+        echo "  Without it, Hybrid/IR falls back to passive IR cues." >&2
+        exit 2
+    fi
+}
+
+need_root_enable() {
+    [ "$(id -u)" -eq 0 ] || {
+        echo "ir-emitter --enable needs root (try: sudo faceid-nim ir-emitter --enable)" >&2
+        exit 1
+    }
+}
+
+case "$MODE" in
+    --probe|--status|-s|"") probe ;;
+    --enable|-e) shift; enable "$@" ;;
+    -h|--help|help)
+        echo "Usage: ir-emitter [--probe|--enable|--status]"
+        echo "  --probe   list IR-capable nodes and tool presence (default)"
+        echo "  --enable  run linux-enable-ir-emitter (needs root)"
+        ;;
+    *) echo "ir-emitter: unknown option $MODE" >&2; exit 2 ;;
+esac

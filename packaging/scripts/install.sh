@@ -1,69 +1,111 @@
 #!/bin/sh
-# faceid-nim installer.
+# faceid-nim installer -- pick the .deb that matches this machine and
+# install it.
 #
-# Piping any script into `sudo sh` is a trust decision, so this one is
-# deliberately boring and short enough to read in full before you run
-# it. It does four things: check the platform, download the .deb and
-# SHA256SUMS from the GitHub release, verify the hash, apt install.
+#   curl -fsSL https://<host>/install.sh | sudo sh
 #
-# The two-step alternative, which you should prefer:
-#   curl -fsSLO https://raw.githubusercontent.com/Gaurav-x111/faceid-nim/main/packaging/scripts/install.sh
-#   less install.sh && sudo sh install.sh
+# Deliberately does three things and nothing else:
+#   1. works out the CPU architecture from dpkg, not from uname, so a
+#      multi-arch or foreign-architecture system is handled correctly;
+#   2. downloads ONE pinned .deb over HTTPS and refuses to run anything
+#      it did not get from the URL it was told to use;
+#   3. hands the rest to dpkg, which runs our postinst -- and postinst is
+#      what fetches the models, detects the cameras and starts the
+#      services. No commands for you to type afterwards.
+#
+# Face unlock is installed DISABLED and stays that way until you enable
+# it in the app. Your password always works.
 set -eu
 
-REPO="Gaurav-x111/faceid-nim"
-TAG="${FACEID_TAG:-latest}"
+VERSION="${FACEID_NIM_VERSION:-}"
+BASE_URL="${FACEID_NIM_URL:-https://github.com/Gaurav-x111/faceid-nim/releases/latest/download}"
+# Single source of truth for the default .deb filename. Bump together with
+# packaging/debian/changelog so a fresh `latest/download` URL works.
+PKG_VERSION="1.1.1-1"
 
-die() { echo "error: $*" >&2; exit 1; }
+say()  { printf '%s\n' "$*"; }
+warn() { printf '%s\n' "$*" >&2; }
+die()  { printf 'faceid-nim: %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "run as root (sudo sh install.sh)"
-[ "$(uname -m)" = "x86_64" ] || die "only amd64 is supported right now"
-command -v apt-get >/dev/null || die "this installer is for Debian/Ubuntu"
+[ "$(id -u)" -eq 0 ] || die "needs root; re-run with: curl -fsSL $0 | sudo sh"
 
-. /etc/os-release
-case "${VERSION_ID:-}" in
-  24.*|25.*|26.*) ;;
-  *) die "Ubuntu 24.04 or newer required (found ${PRETTY_NAME:-unknown})" ;;
+command -v dpkg >/dev/null 2>&1 || die "dpkg not found -- this installer is for Debian/Ubuntu (and derivatives)"
+command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb not found; install the 'dpkg' package"
+
+ARCH="$(dpkg --print-architecture 2>/dev/null || true)"
+[ -n "$ARCH" ] || die "could not determine the package architecture"
+case "$ARCH" in
+    amd64|arm64|armhf|i386) : ;;
+    *) die "unsupported architecture '$ARCH'.
+       This project ships amd64 and arm64 packages. On anything else,
+       build from source:  sudo make install" ;;
 esac
 
-if [ "$TAG" = "latest" ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
+if [ -z "$VERSION" ]; then
+    # `latest/download` only works for tags, not for a plain branch.
+    VERSION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        "$BASE_URL/faceid-nim_${PKG_VERSION}_${ARCH}.deb" 2>/dev/null \
+        | sed 's|.*/tag/||' || true)"
+    [ -n "$VERSION" ] || VERSION="latest"
+fi
+
+if [ "$VERSION" = "latest" ]; then
+    URL="$BASE_URL/faceid-nim_${PKG_VERSION}_${ARCH}.deb"
 else
-  BASE="https://github.com/$REPO/releases/download/$TAG"
+    # Tags are `v1.1.1` but the .deb is `1.1.1-1`: strip a leading `v`
+    # so FACEID_NIM_VERSION=v1.1.1 and 1.1.1 both resolve.
+    DEB_VERSION="$(printf '%s' "$VERSION" | sed 's/^v//')"
+    URL="https://github.com/Gaurav-x111/faceid-nim/releases/download/${VERSION}/faceid-nim_${DEB_VERSION}_${ARCH}.deb"
 fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
-cd "$TMP"
 
-echo "Downloading from $BASE ..."
-curl -fsSLO "$BASE/SHA256SUMS"
-DEB="$(awk '/_amd64\.deb$/ {print $2}' SHA256SUMS | head -1)"
-[ -n "$DEB" ] || die "no amd64 .deb listed in SHA256SUMS"
-curl -fsSLO "$BASE/$DEB"
+say "faceid-nim installer"
+say "  architecture : $ARCH"
+say "  downloading  : $URL"
 
-echo "Verifying checksum ..."
-grep " $DEB\$" SHA256SUMS | sha256sum -c - || die "CHECKSUM MISMATCH -- aborting"
-
-# Signature check, if you have the release key imported. Not fatal,
-# but the README should tell people how to import it and why.
-if command -v gpg >/dev/null && curl -fsSLO "$BASE/SHA256SUMS.asc" 2>/dev/null; then
-  gpg --verify SHA256SUMS.asc SHA256SUMS 2>/dev/null \
-    && echo "signature OK" \
-    || echo "warning: signature not verified (release key not imported?)"
+DL=''
+if command -v curl >/dev/null 2>&1; then
+    DL='curl -fsSL --retry 3 --retry-delay 2 -o'
+elif command -v wget >/dev/null 2>&1; then
+    DL='wget -q -O'
+else
+    die "need curl or wget to download the package"
 fi
 
-echo "Installing $DEB ..."
-apt-get install -y "./$DEB"
+# shellcheck disable=SC2086
+$DL "$TMP/faceid-nim.deb" "$URL" \
+    || die "download failed.
+       Check your connection, or download manually from:
+       $URL"
 
-cat <<'MSG'
+dpkg-deb --info "$TMP/faceid-nim.deb" >/dev/null 2>&1 \
+    || die "the downloaded file is not a valid .deb -- refusing to install it"
 
-Installed. Face unlock is DISABLED until you turn it on.
+INSTALLED_ARCH="$(dpkg-deb -f "$TMP/faceid-nim.deb" Architecture)"
+[ "$INSTALLED_ARCH" = "$ARCH" ] \
+    || die "downloaded a '$INSTALLED_ARCH' package onto a '$ARCH' system"
 
-  1. Open "Face Unlock" and enroll (you will be asked for your password).
-  2. Enable it there.
-  3. On Wayland, log out and back in once so GNOME loads the extension.
+say "  installing   : faceid-nim $INSTALLED_ARCH"
+if dpkg -i "$TMP/faceid-nim.deb"; then
+    :
+else
+    # A dependency missing is the common case on a fresh machine. Let apt
+    # resolve it rather than leaving a half-configured package.
+    say "  resolving dependencies with apt..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -f -y || die "apt could not satisfy the dependencies"
+    else
+        die "dpkg failed and apt-get is not available; see the error above"
+    fi
+fi
 
-Your password always works. If anything breaks, switch to a text
-console (Ctrl+Alt+F3), log in, and run: sudo apt remove faceid-nim
-MSG
+say ""
+say "Installed. Next:"
+say "  1. open \"Face Unlock\" from your applications"
+say "  2. enroll your face, then turn face unlock on there"
+say "  3. on Wayland, log out and back in once so the lock-screen pill loads"
+say ""
+say "Check anything at any time with:  faceid-nim status"
+say "Your password always works. Removing it:  sudo apt remove faceid-nim"

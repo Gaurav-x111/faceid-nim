@@ -40,4 +40,14 @@
       <allow_active>yes</allow_active>
     </defaults>
   </action>
+
+  <action id="org.faceidnim.enable">
+    <description>Enable or disable face unlock in PAM</description>
+    <message>Authentication is required to change PAM face unlock</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

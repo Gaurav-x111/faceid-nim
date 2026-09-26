@@ -202,32 +202,56 @@ class Camera:
         if not cap.isOpened():
             cap.release()
             raise CameraError(f"cannot open camera source {self.cfg.device!r}")
-        if not self.cfg.is_file:
-            self._negotiate(cap)
-            good = 0
+        try:
             sample = None
-            for _ in range(self.cfg.warmup_frames):
-                ok, sample = cap.read()
-                if ok:
-                    good += 1
-            if good == 0:
-                # A camera that opens but yields no frames is broken,
-                # not "timed out". Say so loudly instead of letting the
-                # caller burn a full scan window on silence.
-                cap.release()
-                raise CameraError(
-                    f"camera {self.cfg.device!r} opened but produced no "
-                    "frames")
-            self._verify(cap, sample)
-        self.cap = cap
-        return self
+            if not self.cfg.is_file:
+                self._negotiate(cap)
+                good = 0
+                for _ in range(self.cfg.warmup_frames):
+                    ok, frame = cap.read()
+                    if ok:
+                        good += 1
+                        sample = frame
+                if good == 0:
+                    # A camera that opens but yields no frames is broken,
+                    # not "timed out". Say so loudly instead of letting the
+                    # caller burn a full scan window on silence.
+                    raise CameraError(
+                        f"camera {self.cfg.device!r} opened but produced no "
+                        "frames")
+                self._verify(cap, sample)
+            # IR black-frame guard: emitter off / capped sensor reads ~0.
+            try:
+                import numpy as _np
+                if sample is not None and float(_np.mean(sample)) < 4.0:
+                    log.warning(
+                        "camera %s frames are near-black (mean<4): IR emitter "
+                        "may be off — see linux-enable-ir-emitter; "
+                        "hybrid will fall back to RGB cues", self.cfg.device)
+            except Exception:
+                pass
+            self.cap = cap
+            return self
+        except Exception:
+            cap.release()
+            raise
 
     # ---- negotiation + verification -----------------------------------
     def _negotiate(self, cap: cv2.VideoCapture) -> None:
         """Request only what the device advertises; otherwise leave the
         driver's current settings alone instead of guessing."""
         advertised = probe_formats(self.cfg.device)
-        target = pick_format(self.cfg, advertised) if advertised else None
+        # IR fix: a GREY-only sensor (e.g. /dev/video3 640x360 GREY @15fps)
+        # must never be forced into MJPG 640x480 — the driver falls back
+        # to 1fps or black frames. Drop the MJPG ask on mono devices.
+        cfg = self.cfg
+        if advertised and all(
+                f.fourcc and _pad4(f.fourcc).rstrip().upper() in _MONO_FOURCC
+                for f in advertised):
+            cfg = CameraConfig(device=self.cfg.device, width=640, height=360,
+                               fps=15, fourcc=None, is_file=self.cfg.is_file,
+                               warmup_frames=self.cfg.warmup_frames)
+        target = pick_format(cfg, advertised) if advertised else None
         if target is None:
             # Rather than blind-setting values and hoping, fall back to
             # whatever the driver already reports as current.

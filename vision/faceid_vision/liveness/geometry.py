@@ -50,8 +50,8 @@ class PlanarityTracker:
     flat_below: float = 0.012          # residual/IOD -- MEASURE THIS, do not trust it
     solid_above: float = 0.030
     min_pose_delta: float = 0.10
-    eye_l: int = 0
-    eye_r: int = 1
+    eye_l: int = 33
+    eye_r: int = 263
     _ref: np.ndarray | None = None
     _ref_pose: float = 0.0
     residuals: list[float] = field(default_factory=list)

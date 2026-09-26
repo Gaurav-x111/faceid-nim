@@ -13,6 +13,20 @@ case "$1" in
     ;;
 esac
 
+# Units go on both remove and purge. The provisioning unit in particular
+# must not survive the package that installed it: it is WantedBy
+# multi-user.target, so leaving it enabled would keep re-fetching models
+# onto a machine the user just uninstalled from, on every boot.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now faceid-nim-fetch-models.service >/dev/null 2>&1 || true
+    systemctl disable --now faceid-nimd.service >/dev/null 2>&1 || true
+    systemctl disable --now faceid-vision.service >/dev/null 2>&1 || true
+fi
+# Generated, not shipped: it is recreated on install only if a GPU is
+# actually present, so a stale one has to be cleaned up here.
+rm -f /etc/systemd/system/faceid-vision.service.d/10-gpu-devices.conf
+rmdir /etc/systemd/system/faceid-vision.service.d 2>/dev/null || true
+
 systemctl daemon-reload || true
 
 #DEBHELPER#

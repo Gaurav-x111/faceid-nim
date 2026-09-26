@@ -18,9 +18,14 @@
   </enum>
 
   <enum id="org.faceidnim.settings.mode">
-    <value nick="rgb"  value="0"/>
-    <value nick="ir"   value="1"/>
-    <value nick="both" value="2"/>
+    <value nick="rgb"    value="0"/>
+    <value nick="ir"     value="1"/>
+    <value nick="both"   value="2"/>
+    <value nick="hybrid" value="3"/>
+    <!-- Must stay in step with CameraMode in daemon/src/config.rs.
+         'auto' was missing here, which is exactly the kind of drift this
+         schema exists to prevent. -->
+    <value nick="auto"   value="4"/>
   </enum>
 
   <schema id="org.faceidnim.settings" path="/org/faceidnim/settings/">

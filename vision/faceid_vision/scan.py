@@ -62,6 +62,14 @@ class ScanConfig:
     # must only ever exist for a session the enrolling app owns.
     preview: bool = False
 
+    def __post_init__(self):
+        self.max_embeddings = max(1, int(self.max_embeddings))
+        self.min_embeddings = max(1, int(self.min_embeddings))
+        self.embed_every = max(1, int(self.embed_every or 1))
+        self.moire_frames = max(1, int(self.moire_frames or 5))
+        self.moire_required = max(1, min(int(self.moire_required or 3),
+                                        self.moire_frames))
+
 
 @dataclass
 class ScanResult:
@@ -109,11 +117,15 @@ class ScanEngine:
 
     def __init__(self, detector: Detector, embedder: Embedder,
                  antispoof: PassiveAntiSpoof | None = None,
-                 mesh: FaceMesh | None = None):
+                 mesh: FaceMesh | None = None,
+                 landmarks: FaceMesh | None = None):
         self.detector = detector
         self.embedder = embedder
         self.antispoof = antispoof or PassiveAntiSpoof(None)
-        self.mesh = mesh if mesh is not None else FaceMesh()
+        # `mesh` is the historical name and is still what tests inject;
+        # `landmarks` is what build_engine passes. One object either way.
+        self.mesh = mesh if mesh is not None else (
+            landmarks if landmarks is not None else FaceMesh())
         self.preview_cfg = _ep.PreviewConfig()
 
     # ---- the main loop -------------------------------------------------
@@ -182,7 +194,7 @@ class ScanEngine:
                     elif challenge.update(dense.yaw_signed, dense.pitch, blink.blinks):
                         state.add_confirm("challenge")
 
-                if usable_seen % cfg.embed_every == 0 and \
+                if usable_seen % max(1, cfg.embed_every) == 0 and \
                         len(res.embeddings) < cfg.max_embeddings:
                     try:
                         crop = align(frame, face.landmarks, self.embedder.size)
@@ -200,10 +212,19 @@ class ScanEngine:
         except Exception as e:                      # never let the worker die mid-auth
             res.error = f"worker_error: {type(e).__name__}"
 
-        state.attention_ok = (blink.eyes_open if self.mesh.available
-                              else True)            # no mesh: cannot judge attention
+        state.attention_ok = True
+        if self.mesh.available:
+            # blink.history empty = no dense observations (dark/IR/fast
+            # motion): unknown, not closed. Only a measured closed eye
+            # may veto when require_attention is on.
+            state.attention_ok = blink.eyes_open if blink.history else True
         if not self.mesh.available:
+            # Say *why*, not just "unavailable". A liveness backend that
+            # is missing and one that is broken need different fixes, and
+            # the difference used to be invisible.
             state.notes["mesh"] = "unavailable"
+            state.notes["mesh_backend"] = getattr(self.mesh, "backend", "none")
+            state.notes["mesh_reason"] = getattr(self.mesh, "reason", "")
         res.elapsed_ms = int((time.monotonic() - t0) * 1000)
         if not res.embeddings and res.error is None:
             res.error = "no_usable_face"
@@ -249,14 +270,39 @@ class ScanEngine:
         # it. cfg.mode is the sole authority: the mere presence of an
         # opened IR camera, or a single-channel (GREY) negotiated frame,
         # must never promote an "rgb"/"hybrid"-rgb scan to IR analysis.
-        if cfg.mode in ("ir", "both", "hybrid") and ir_camera is not None:
-            for _ts, ir in ir_camera.frames(0.15):
-                rep = analyse_ir_face(ir, face.box)
+        # IR-primary native cue: a resolved auto->IR (or plain ir) scan
+        # has no secondary IR camera — the primary IS the IR sensor — so
+        # run analyse_ir_face on the primary frame directly (box already
+        # in primary pixels, no rescale). Otherwise a resolved-IR scan
+        # would carry zero spoof cues.
+        if cfg.mode == "ir" and ir_camera is None:
+            try:
+                rep = analyse_ir_face(frame, face.box)
                 if rep.screen_dark:
                     state.add_deny("ir_screen_dark")
                 elif rep.skin_response_ok:
                     state.add_confirm("ir_skin")
-                break
+            except Exception:
+                pass
+        if cfg.mode in ("ir", "both", "hybrid") and ir_camera is not None:
+            try:
+                for _ts, ir in ir_camera.frames(0.15):
+                    # Rescale RGB box -> IR pixels (sensors differ in
+                    # resolution/FOV, e.g. 640x480 vs 640x360).
+                    rh = frame.shape[0] / max(1, ir.shape[0])
+                    rw = frame.shape[1] / max(1, ir.shape[1])
+                    # face.box is (x,y,w,h) in RGB pixels; map to IR.
+                    bx, by, bw, bh = face.box
+                    scaled = (int(bx / rw), int(by / rh),
+                              int(bw / rw), int(bh / rh))
+                    rep = analyse_ir_face(ir, scaled)
+                    if rep.screen_dark:
+                        state.add_deny("ir_screen_dark")
+                    elif rep.skin_response_ok:
+                        state.add_confirm("ir_skin")
+                    break
+            except Exception:
+                pass  # IR is secondary: never veto a good RGB scan
 
     def _collect_confirm_cues(self, dense, face: Face,
                               planar: PlanarityTracker,
@@ -282,8 +328,9 @@ class ScanEngine:
             return False
         if cfg.strictness is Strictness.HEAVY and not state.confirm:
             return False                                   # keep looking for a blink
-        return len(res.embeddings) >= cfg.max_embeddings or \
-            len(res.embeddings) >= cfg.min_embeddings
+        # min reached (and heavy confirm satisfied): enough for voting.
+        # max_embeddings only caps collection in the loop above.
+        return True
 
 
 def build_engine(model_dir: Path | None = None, manifest: Path | None = None,
@@ -298,13 +345,19 @@ def build_engine(model_dir: Path | None = None, manifest: Path | None = None,
 
     det_path, _ = M.resolve("detector", verify=verify, **kw)
     emb_path, emb_spec = M.resolve("recognizer", verify=verify, **kw)
-    try:
-        spoof_path, _ = M.resolve("antispoof", verify=verify, **kw)
-    except M.ModelError:
-        spoof_path = None
+
+    # Both of these are optional features, and both are resolved through
+    # resolve_optional so "not installed" is a logged, reported, degraded
+    # state rather than a silent False. Recognition never depends on
+    # either one.
+    spoof = M.resolve_optional("antispoof", verify=verify, **kw)
+    spoof_path = spoof[0] if spoof else None
+    marks = M.resolve_optional("landmarks", verify=verify, **kw)
+    landmark_path = marks[0] if marks else None
 
     return ScanEngine(
         detector=Detector(det_path),
         embedder=Embedder(emb_path, model_id=emb_spec.model_id),
         antispoof=PassiveAntiSpoof(spoof_path),
+        landmarks=FaceMesh(model_path=landmark_path),
     )

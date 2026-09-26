@@ -1,0 +1,44 @@
+[Unit]
+Description=faceid-nim model provisioning (retry until the models land)
+Documentation=https://github.com/Gaurav-x111/faceid-nim
+# Models are fetched from the network, so wait for it. WantedBy
+# multi-user.target below means this also runs on every boot, which is
+# what rescues a machine that was offline during the install.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The whole point: skip when the models are already there and verified.
+# Costs one sha256sum per model and no network traffic.
+ExecCondition=/usr/libexec/faceid-nim/verify-models --quiet
+ExecStart=/usr/libexec/faceid-nim/fetch-models
+# A machine with no network must still finish booting, and a failed
+# fetch must never look like a failed install. Exit 0 either way; the
+# next boot tries again.
+SuccessExitStatus=0 1
+TimeoutStartSec=300
+
+# Provisioning needs nothing but the network and a writable model dir.
+# It is the one unit allowed to write /var/lib/faceid-nim/models, and it
+# runs as root because the model files are root-owned and world-readable
+# (the unprivileged worker must be able to read them and nothing else).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/faceid-nim
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

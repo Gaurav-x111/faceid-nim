@@ -1,6 +1,14 @@
 #!/bin/sh
-# verify-models -- exit 0 only if every manifest entry is present and
-# its SHA-256 matches.
+# verify-models -- exit 0 only if every REQUIRED pinned manifest entry is
+# present and its SHA-256 matches.
+#
+# Two kinds of "not installed" are deliberately NOT failures:
+#   * an unpinned entry (placeholder sha256), and
+#   * an entry marked `optional = true` in the manifest.
+# Both mean a feature that degrades rather than a broken install. The
+# recogniser and the detector are never optional, so a machine missing
+# either of those still fails here -- and that is the case where face
+# unlock genuinely cannot work.
 #
 # Called from postinst and from `faceid-nim verify`. The daemon and
 # worker do their own verification at load time; this is the
@@ -28,31 +36,44 @@ say() { [ "$QUIET" -eq 1 ] || echo "$@"; }
 [ -r "$MANIFEST" ] || { echo "verify-models: cannot read $MANIFEST" >&2; exit 1; }
 
 PARSED="$(awk '
+    function flush() {
+        if (name != "") print name "\t" file "\t" sha "\t" opt
+    }
     /^[[:space:]]*\[model\./ {
-        if (name != "") print name "\t" file "\t" sha
+        flush()
         name = $0; sub(/^[[:space:]]*\[model\./, "", name); sub(/\].*$/, "", name)
-        file = ""; sha = ""
+        file = ""; sha = ""; opt = "false"
         next
     }
     /^[[:space:]]*file[[:space:]]*=/  { file = $0; sub(/^[^"]*"/, "", file); sub(/".*$/, "", file); next }
     /^[[:space:]]*sha256[[:space:]]*=/{ sha  = $0; sub(/^[^"]*"/, "", sha);  sub(/".*$/, "", sha);  next }
-    END { if (name != "") print name "\t" file "\t" sha }
+    /^[[:space:]]*optional[[:space:]]*=/ {
+        opt = $0; sub(/^[^=]*=[[:space:]]*/, "", opt); gsub(/[[:space:]]/, "", opt)
+        sub(/#.*$/, "", opt); next
+    }
+    END { flush() }
 ' "$MANIFEST")"
 
 [ -n "$PARSED" ] || { echo "verify-models: no [model.*] entries" >&2; exit 1; }
 
 fail=0
-printf '%s\n' "$PARSED" > /tmp/.faceid-verify.$$
-trap 'rm -f /tmp/.faceid-verify.$$' EXIT INT TERM
+TMPF="$(mktemp /tmp/.faceid-verify.XXXXXX)"
+trap 'rm -f "$TMPF"' EXIT INT TERM
+printf '%s\n' "$PARSED" > "$TMPF"
 
-while IFS="$(printf '\t')" read -r name file sha; do
+while IFS="$(printf '\t')" read -r name file sha opt; do
     dest="$MODEL_DIR/$file"
     case "$sha" in
         ""|REPLACE_ME*|*[!0-9a-fA-F]*)
-            say "  $name: UNPINNED (manifest sha256 is a placeholder)"
-            fail=1; continue ;;
+            say "  $name: unpinned; not loaded (no SHA-256 to verify against)"
+            continue ;;
     esac
     if [ ! -f "$dest" ]; then
+        if [ "$opt" = "true" ]; then
+            # Degraded, not broken. Say what the user loses.
+            say "  $name: not installed (optional); features using it report unavailable"
+            continue
+        fi
         say "  $name: MISSING ($dest)"
         fail=1; continue
     fi
@@ -62,11 +83,12 @@ while IFS="$(printf '\t')" read -r name file sha; do
         fail=1; continue
     fi
     say "  $name: ok"
-done < /tmp/.faceid-verify.$$
+done < "$TMPF"
 
 if [ "$fail" -ne 0 ]; then
-    say "verify-models: some models are missing or unverified"
+    say "verify-models: required models are missing or unverified"
+    say "                run: sudo faceid-nim fetch-models"
     exit 1
 fi
-say "verify-models: all models present and verified"
+say "verify-models: all required models present and verified"
 exit 0
