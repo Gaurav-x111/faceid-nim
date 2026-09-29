@@ -260,6 +260,7 @@ class FaceIdPill extends St.Widget {
         this._startMs = 0;
         this._welcomeStart = 0;
         this._progress = 0;
+        this._pendingVerify = false;
         this._reason = '';
         this._lastScanT = 0;
         this._rejectSweep = 0;
@@ -302,6 +303,7 @@ class FaceIdPill extends St.Widget {
         try { this._animOff = !animationsEnabled(); }
         catch (e) { this._animOff = false; }
         this._reason = reason || '';
+        this._pendingVerify = false;
         this.translation_x = 0;     // clear any shake from a rejection
         this._show();
         if (this._state === 'opening' || this._state === 'scanning' ||
@@ -330,6 +332,18 @@ class FaceIdPill extends St.Widget {
         this._show();
         if (this._state === 'success' || this._state === 'rejected')
             return;
+        if (this._state === 'opening') {
+            // The splash has a minimum play time (OpeningScene.duration,
+            // the fade the user picked). A fast scan must not cut it off
+            // after one frame: hold the verifying progress and let the
+            // tick loop perform the handoff on time.
+            this._pendingVerify = true;
+            return;
+        }
+        this._enterVerifying();
+    }
+
+    _enterVerifying() {
         this._enter('verifying');
         this._opening.handoff(this);    // splash gone, glyph takes over
         this._glyph.visible = true;
@@ -338,6 +352,7 @@ class FaceIdPill extends St.Widget {
 
     showMatched(detail = null) {
         this._reason = detail || this._reason || '';
+        this._pendingVerify = false;
         this._show();
         this._opening.handoff(this);
         this._glyph.visible = true;
@@ -422,6 +437,7 @@ class FaceIdPill extends St.Widget {
     showRejected(reason = null) {
         this._rejectSweep = (GLib.get_monotonic_time() / 1000) % SWEEP_MS / SWEEP_MS;
         this._reason = reason || '';
+        this._pendingVerify = false;
         this._show();
         this._setClasses(false);
         this._setLabel('Hover to try again');
@@ -433,6 +449,7 @@ class FaceIdPill extends St.Widget {
         this._startMs = 0;
         this._welcomeStart = 0;
         this._progress = 0;
+        this._pendingVerify = false;
         this._setClasses(null); // idle: clear ok/fail tint
         this._setLabel('');
         this._card.visible = false;
@@ -554,8 +571,8 @@ class FaceIdPill extends St.Widget {
 
     _setLabel(text) {
         this._label.text = text || '';
-        this._cardSub.visible =
-            this._loginContext && this._state !== 'rejected';
+        this._cardSub.visible = this._loginContext &&
+            this._state !== 'rejected' && this._card.visible;
         // Centre the status line inside the island (not the glyph square).
         const [min, nat] = this._label.get_preferred_width(-1);
         const w = Math.max(nat, min);
@@ -714,10 +731,13 @@ class FaceIdPill extends St.Widget {
             this._glyph.animate({ phase: 'rays', scanT: 0, t: 0,
                                   progress: 0, ramp: 0, failed: false });
             if (sinceMs >= this._opening.duration()) {
-                this._state = 'scanning';
                 this._opening.handoff(this);
                 this._glyph.visible = true;
                 this._setLabel(SCAN_TEXT);
+                // A verifying signal that arrived mid-splash was held
+                // above; honour it now instead of dropping to scanning.
+                this._enter(this._pendingVerify ? 'verifying' : 'scanning');
+                this._pendingVerify = false;
             }
             break;
         }

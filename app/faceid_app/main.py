@@ -1000,6 +1000,23 @@ class Window(Adw.ApplicationWindow):
         self._scanface_notify_id = self.cb_scan_face.connect(
             "notify::selected", self.on_scan_face_selected)
         faceg.add(self.cb_scan_face)
+
+        self._scan_face_previews = []
+        preview_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                               spacing=8, margin_top=4)
+        for i, (label, icon_name) in enumerate((
+                ("Smile", "face-smile-symbolic"),
+                ("Orbit", "face-orbit-symbolic"),
+                ("Classic", "face-classic-symbolic"))):
+            btn = Gtk.Button(icon_name=icon_name, tooltip_text=label,
+                             valign=Gtk.Align.CENTER)
+            btn.add_css_class("flat")
+            btn.add_css_class("circular")
+            btn.connect("clicked",
+                        lambda _b, idx=i: self.cb_scan_face.set_selected(idx))
+            preview_box.append(btn)
+            self._scan_face_previews.append(btn)
+        faceg.add(preview_box)
         page.add(faceg)
 
         pvgroup = Adw.PreferencesGroup(
@@ -1025,6 +1042,14 @@ class Window(Adw.ApplicationWindow):
         pb.connect("clicked", self._preview_success)
         prow.add_suffix(pb)
         pvgroup.add(prow)
+        orow = Adw.ActionRow(
+            title="Preview opening animation",
+            subtitle="Play the selected opening animation inline")
+        ob = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
+        ob.add_css_class("suggested-action")
+        ob.connect("clicked", self._preview_opening_inline)
+        orow.add_suffix(ob)
+        pvgroup.add(orow)
         page.add(pvgroup)
 
         make = Adw.PreferencesGroup(title="Make your own")
@@ -1090,6 +1115,13 @@ class Window(Adw.ApplicationWindow):
             parts.append(f'“{s["text"]}”')
         return " · ".join(parts)
 
+    @staticmethod
+    def _duration_label(s: dict) -> str:
+        ms = int(s.get("fade_ms") or 420)
+        if ms < 1000:
+            return f"{ms}ms"
+        return f"{ms / 1000:.1f}s"
+
     def on_scan_face_selected(self, row, _param=None):
         if self._suspend_changes:
             return
@@ -1125,7 +1157,9 @@ class Window(Adw.ApplicationWindow):
             self.cb_opening.set_model(Gtk.StringList.new(names))
             active = cfg.get("active") or "glance"
             if active in ids:
-                self.cb_opening.set_selected(ids.index(active))
+                GLib.idle_add(
+                    lambda idx=ids.index(active):
+                        self.cb_opening.set_selected(idx))
         finally:
             self._block_opening_signals(False)
             self._suspend_changes = False
@@ -1139,12 +1173,19 @@ class Window(Adw.ApplicationWindow):
         self.preview_area.queue_draw()
 
         self._clear(self.opening_group, self._opening_rows)
+        active_id = cfg.get("active") or "glance"
         for vid in ids:
             if vid in openings.BUILTIN:
                 continue
             s = openings.spec(cfg, vid) or {}
-            row = Adw.ActionRow(title=s.get("name") or vid,
+            is_active = vid == active_id
+            title = s.get("name") or vid
+            if is_active:
+                title = f"{title}  ✓"
+            row = Adw.ActionRow(title=title,
                                 subtitle=self._opening_summary(s))
+            if is_active:
+                row.add_css_class("active-opening")
             for icon, tip, fn in (
                     ("preferences-system-symbolic", "Edit",
                      lambda b, v=vid: self._open_editor(v)),
@@ -1259,6 +1300,38 @@ class Window(Adw.ApplicationWindow):
                 self._schedule_openings_refresh()
                 self.toast(f"Opening animation: {s.get('name') or vid} "
                            "(next lock)")
+
+    def _preview_opening_inline(self, _b=None) -> None:
+        """Play the selected opening animation in a small inline window."""
+        s = openings.spec(self._openings,
+                          self._openings.get("active") or "glance") or {}
+        if not s:
+            self.toast("No animation selected")
+            return
+
+        dlg = Adw.AlertDialog(
+            heading=s.get("name") or "Animation",
+            body="Preview of the selected opening animation.")
+        dlg.add_response("close", "Close")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      width_request=300, height_request=120)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_halign(Gtk.Align.CENTER)
+
+        preview = Gtk.DrawingArea(width_request=280, height_request=80)
+        preview.add_css_class("opening-preview")
+        preview.set_draw_func(self._draw_opening_preview, None)
+        box.append(preview)
+
+        label = Gtk.Label(label=s.get("description") or "")
+        label.add_css_class("dim-label")
+        label.set_wrap(True)
+        box.append(label)
+
+        dlg.set_extra_child(box)
+        dlg.connect("response", lambda _d, _r: dlg.close())
+        dlg.present(self)
 
     def _preview_success(self, _b=None) -> None:
         """Developer-only: ask the daemon to play the full success
@@ -1662,6 +1735,9 @@ class Window(Adw.ApplicationWindow):
         dlg.present(self)
 
     def _delete_opening(self, variant_id: str) -> None:
+        cfg = self._openings
+        s = openings.spec(cfg, variant_id)
+        name = s.get("name") if s else variant_id
         dlg = Adw.AlertDialog(
             heading="Delete this animation?",
             body="The animation and its logo files are removed from this "
@@ -1674,10 +1750,32 @@ class Window(Adw.ApplicationWindow):
             if resp == "delete":
                 if openings.remove_variant(self._openings, variant_id):
                     self._refresh_openings()
-                    self.toast("Animation deleted")
+                    self._show_undo_toast(variant_id, name)
 
         dlg.connect("response", on_response)
         dlg.present(self)
+
+    def _show_undo_toast(self, variant_id: str, name: str) -> None:
+        toast = Adw.Toast(title=f"Deleted {name}")
+        toast.set_button_label("Undo")
+        toast.connect("button-clicked", lambda _t: self._undo_delete(variant_id, name))
+        toast.set_timeout(5)
+        self.toasts.add_toast(toast)
+
+    def _undo_delete(self, variant_id: str, name: str) -> None:
+        cfg = self._openings
+        cfg.setdefault("variants", {})[variant_id] = {
+            "kind": "custom",
+            "name": name,
+            "ease": "outCubic",
+            "fade_ms": 420,
+            "scale": True,
+            "ring": False,
+        }
+        openings.save(cfg)
+        self._openings = openings.load()
+        self._refresh_openings()
+        self.toast(f"Restored {name}")
 
     # ---- camera UI ---------------------------------------------------
     def on_camera_mode_changed(self, *_a) -> None:
