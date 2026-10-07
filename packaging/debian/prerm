@@ -5,7 +5,10 @@
 set -e
 
 case "$1" in
-  remove|deconfigure)
+  # `purge` matters too: without it, purging leaves the PAM profile
+  # registered while the .so is deleted, and common-auth keeps
+  # referencing a module that no longer exists (round-2 audit).
+  remove|purge|deconfigure)
     pam-auth-update --package --remove faceid-nim || true
     systemctl disable --now faceid-vision.service || true
     systemctl disable --now faceid-nimd.service || true

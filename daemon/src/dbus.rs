@@ -290,6 +290,16 @@ impl Daemon1 {
     ) -> zbus::fdo::Result<(bool, String)> {
         let uid = self.caller_uid(&hdr).await?;
         let cfg = self.cfg.lock().await.clone();
+        // Diagnostic scans consume the same camera/worker as real
+        // unlocks, so they wait in the same queue: otherwise any local
+        // user could starve PAM auth scans into budget timeouts by
+        // firing TestScan in a loop (round-2 audit).
+        let _scan_permit = self
+            .engine
+            .scan_slots
+            .acquire()
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("scan slots unavailable".into()))?;
         let stx = self.engine.state_tx.clone();
 
         let _ = stx.send((ScanState::Waking, 0.0, String::new())).await;
@@ -613,6 +623,9 @@ impl Daemon1 {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<zvariant::OwnedFd> {
         let uid = self.caller_uid(&hdr).await?;
+        // The pipe carries live camera frames: never hand it out
+        // without the caller proving who they are first.
+        authz::require_polkit(&self.conn, &hdr, authz::ACTION_PREVIEW).await?;
         let (read_pipe, write_pipe) =
             make_pipe2().map_err(|e| zbus::fdo::Error::Failed(format!("preview pipe: {e}")))?;
 

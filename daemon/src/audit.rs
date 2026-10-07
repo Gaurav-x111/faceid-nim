@@ -59,6 +59,43 @@ pub struct Audit {
     path: PathBuf,
     timeline_path: std::sync::RwLock<PathBuf>,
     timeline_enabled: std::sync::atomic::AtomicBool,
+    /// Lines dropped while the file sat at MAX_AUDIT_BYTES (reset when
+    /// logging resumes). Reported to the journal, never to a caller.
+    dropped: std::sync::atomic::AtomicU64,
+}
+
+/// Hard ceiling on the audit file. Every refused attempt logs a line
+/// and refusals complete instantly, so without a writer-side bound one
+/// local client can fill the disk between logrotate runs (round-2
+/// audit measured ~10k lines/s). Past the ceiling, lines are dropped
+/// *with accounting* instead of growing the file: a 50 MB file of
+/// refusals is already the signal, and the journal copy (bounded
+/// separately by journald) still fires. External rotation shrinks the
+/// file and logging resumes on its own. Legitimate use is bytes a day;
+/// 50 MB holds on the order of 250k lines.
+pub const MAX_AUDIT_BYTES: u64 = 50 * 1024 * 1024;
+const _: () = assert!(
+    MAX_AUDIT_BYTES >= 1024 * 1024,
+    "audit cap must stay generous"
+);
+
+/// Append one line unless the file already exceeds `cap`.
+/// Ok(true) = written, Ok(false) = at cap (drop with accounting),
+/// Err = the write itself failed.
+fn append_capped(path: &Path, line: &str, cap: u64) -> std::io::Result<bool> {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > cap)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    writeln!(f, "{line}")?;
+    Ok(true)
 }
 
 impl Audit {
@@ -72,6 +109,7 @@ impl Audit {
                 "/var/log/faceid-nim/timeline.jsonl",
             )),
             timeline_enabled: std::sync::atomic::AtomicBool::new(false),
+            dropped: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -93,14 +131,27 @@ impl Audit {
         };
         // Logging must never be able to break authentication, so every
         // failure here is swallowed after a trace.
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&self.path)
-        {
-            Ok(mut f) => {
-                let _ = writeln!(f, "{line}");
+        match append_capped(&self.path, &line, MAX_AUDIT_BYTES) {
+            Ok(true) => {
+                let dropped = self.dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
+                if dropped > 0 {
+                    tracing::warn!(
+                        "audit log resumed after rotation \
+                         ({dropped} lines dropped at the cap)"
+                    );
+                }
+            }
+            Ok(false) => {
+                let n = self
+                    .dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if n == 1 || n % 10_000 == 0 {
+                    tracing::warn!(
+                        "audit log at cap ({MAX_AUDIT_BYTES} bytes); \
+                         dropping lines (#{n})"
+                    );
+                }
             }
             Err(e) => tracing::warn!("audit write failed: {e}"),
         }
@@ -222,5 +273,22 @@ mod tests {
                 "audit line leaked {forbidden}: {text}"
             );
         }
+    }
+
+    /// The disk-exhaustion bound (round-2 audit): past the cap, lines
+    /// are dropped instead of growing the file, and logging resumes
+    /// after something external (logrotate, an admin) shrinks it.
+    #[test]
+    fn capped_append_bounds_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("audit.log");
+        assert!(append_capped(&p, "one", 100).unwrap());
+        assert!(append_capped(&p, "two", 100).unwrap());
+        let len = std::fs::metadata(&p).unwrap().len();
+        assert!(!append_capped(&p, "three", len - 1).unwrap());
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), len);
+        // Rotation (truncate) resumes logging.
+        std::fs::write(&p, b"").unwrap();
+        assert!(append_capped(&p, "four", len - 1).unwrap());
     }
 }

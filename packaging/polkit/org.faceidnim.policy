@@ -19,6 +19,19 @@
     </defaults>
   </action>
 
+  <!-- The preview pipe carries live camera frames, so watching it
+       needs the same re-auth as enrolling. Without this, any local
+       user could observe the camera without proving who they are. -->
+  <action id="org.faceidnim.preview">
+    <description>View the face unlock camera preview</description>
+    <message>Authentication is required to view the camera preview</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+
   <action id="org.faceidnim.settings">
     <description>Change face unlock settings</description>
     <message>Authentication is required to change face unlock settings</message>

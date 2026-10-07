@@ -8,6 +8,11 @@ pub const ACTION_ENROLL: &str = "org.faceidnim.enroll";
 pub const ACTION_SETTINGS: &str = "org.faceidnim.settings";
 pub const ACTION_DELETE: &str = "org.faceidnim.delete";
 pub const ACTION_ENABLE: &str = "org.faceidnim.enable";
+/// Watching the camera is reading a sensor in the user's room, so the
+/// preview pipe needs the same account-password re-auth as enrollment.
+/// (Round-2 audit: StartPreview handed camera JPEGs to any local
+/// caller with only a uid check.)
+pub const ACTION_PREVIEW: &str = "org.faceidnim.preview";
 
 type PolkitSubject = (String, HashMap<String, OwnedValue>);
 type AuthzResult = zbus::Result<(bool, bool, HashMap<String, String>)>;
@@ -80,9 +85,16 @@ mod tests {
         assert_eq!(ACTION_SETTINGS, "org.faceidnim.settings");
         assert_eq!(ACTION_DELETE, "org.faceidnim.delete");
         assert_eq!(ACTION_ENABLE, "org.faceidnim.enable");
+        assert_eq!(ACTION_PREVIEW, "org.faceidnim.preview");
         let policy = std::fs::read_to_string("../packaging/polkit/org.faceidnim.policy")
             .expect("installed polkit policy");
-        for action in [ACTION_ENROLL, ACTION_SETTINGS, ACTION_DELETE, ACTION_ENABLE] {
+        for action in [
+            ACTION_ENROLL,
+            ACTION_SETTINGS,
+            ACTION_DELETE,
+            ACTION_ENABLE,
+            ACTION_PREVIEW,
+        ] {
             assert!(policy.contains(&format!("action id=\"{action}\"")));
         }
         let bus = std::fs::read_to_string("../packaging/dbus/org.faceidnim.Daemon1.conf")

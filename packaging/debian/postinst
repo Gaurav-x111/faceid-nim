@@ -193,7 +193,17 @@ CFG
     # --- PAM ----------------------------------------------------------
     # Registers the profile as *available*. Default: no keeps it out of
     # the stack until the app enables it.
-    pam-auth-update --package
+    #
+    # Fresh installs only ($2 is empty): pam-auth-update regenerates
+    # every common-* file from the shipped profiles, which would
+    # discard any local tuning an admin made to the faceid stanza
+    # (e.g. a shorter timeout in /etc/pam.d/common-auth). On upgrade
+    # the generated stack is already in place, so leave it alone
+    # (round-2 audit). Profile changes shipped in an upgrade take
+    # effect on fresh installs; document them in the changelog.
+    if [ -z "${2:-}" ]; then
+      pam-auth-update --package
+    fi
 
     # --- services -----------------------------------------------------
     systemctl daemon-reload || true

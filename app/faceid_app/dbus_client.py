@@ -92,7 +92,9 @@ class Daemon:
         self._call("PreviewAnimation", GLib.Variant("(s)", (identity,)))
 
     def start_preview(self) -> int:
-        """Open a view-only camera stream (unprivileged).
+        """Open a view-only camera stream (polkit-gated: the daemon
+        requires the org.faceidnim.preview authorization, i.e. the
+        account password, before handing out the pipe).
 
         Returns the daemon-side preview pipe fd, framed as 'J'+u32be
         jpeg frames and 'G'+u32be "status|reason" guidance lines. Use

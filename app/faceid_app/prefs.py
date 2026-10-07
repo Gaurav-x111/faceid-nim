@@ -35,6 +35,19 @@ DEFAULTS = {"camera_mode": "auto", "rgb_dev": "", "ir_dev": "",
             "animations_enabled": True}
 
 
+def has_user_value(key: str) -> bool:
+    """True if the stored file explicitly sets key, as opposed to
+    load() filling in a default. Lets first-run code seed a default
+    from the desktop environment without ever overriding an explicit
+    user choice."""
+    try:
+        with open(pref_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and key in data
+
+
 def load() -> dict:
     path = pref_path()
     try:

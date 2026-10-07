@@ -154,6 +154,13 @@ impl Store {
         if ident.templates.iter().any(|t| t.len() != dim) {
             bail!("inconsistent embedding dimensions");
         }
+        // Cosine matching with NaN/Inf is meaningless (NaN dots never
+        // match, Inf dots match everything), so refuse them at the
+        // door rather than persisting an identity that can never match
+        // — or, worse, one that matches anyone (round-2 audit).
+        if ident.templates.iter().flatten().any(|v| !v.is_finite()) {
+            bail!("refusing to save a non-finite embedding");
+        }
 
         // v2 always: spectra tags appended after the floats. Callers that
         // did not set spectra (or set a short vec) get ANY (legacy match).
@@ -462,6 +469,17 @@ mod tests {
         let s = Store::open(d.path()).unwrap();
         assert!(s.path(1000, "../../etc/shadow").is_err());
         assert!(s.path(1000, "").is_err());
+    }
+
+    #[test]
+    fn non_finite_embeddings_are_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut i = ident();
+            i.templates = vec![vec![bad, 0.2, 0.3, 0.4]];
+            assert!(s.save(1000, &i).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]
