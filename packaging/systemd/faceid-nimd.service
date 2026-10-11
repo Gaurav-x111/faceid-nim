@@ -28,6 +28,13 @@ RestartSec=2s
 # so it can still connect in either direction.
 RuntimeDirectory=faceid-nim
 RuntimeDirectoryMode=0755
+# Audit 2026-10-06: without this, systemd wipes /run/faceid-nim on
+# daemon stop, tearing down auth.sock AND the worker's subdirectory
+# out from under the still-running worker -- the socket-teardown-on-
+# restart race. Preserving is safe: serve() unlinks a stale auth.sock
+# and recreates the tree on every start, and ExecStartPre below
+# re-asserts the worker subdir's ownership and mode.
+RuntimeDirectoryPreserve=yes
 ExecStartPre=/usr/bin/install -d -o root -g faceid -m 0770 /run/faceid-nim/worker
 
 # Runs as root because it must authenticate a user before that user's

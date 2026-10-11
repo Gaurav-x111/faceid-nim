@@ -128,9 +128,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y debhelper python3-all python3-venv \
                                       libpam0g-dev meson ninja-build build-essential
-      # The daemon needs rustc >= 1.75. The runner's apt rustc is older,
-      # and rustup does not register dpkg packages -- which is why the
-      # build below passes DEB_FLAGS=-d.
+      # The daemon needs rustc >= 1.85 (edition2024 crates in the
+      # lockfile). No supported Ubuntu apt toolchain reaches that
+      # (24.04 tops out at 1.75), and rustup does not register dpkg
+      # packages -- which is why the build below passes DEB_FLAGS=-d.
       - name: Install a current Rust toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

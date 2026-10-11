@@ -24,6 +24,51 @@ Design rules: the PAM module does no AI; the worker never sees
 templates; the UI never sees frames or embeddings; and the PAM profile
 is `sufficient`, so **your password always works**.
 
+## Summary
+
+**Technical:** A Linux face-unlock system built in five languages. The
+Rust daemon handles D-Bus auth, encrypted template storage, and
+template-match voting (best-of-n similarity scores must reach threshold).
+The Python vision worker runs YuNet for detection, a landmark-based
+similarity warp to 112x112, SFace for 128-d embeddings via ONNX Runtime,
+and MediaPipe's 478-point face mesh for liveness cues. A C PAM module
+bridges to system auth. A GTK4 settings app provides enrollment and
+animation editing. A GNOME Shell extension renders the Dynamic-Island
+pill. Packaged as a universal `.deb` with arch detection, auto-model
+fetch, and systemd units.
+
+**Theory:** Dual-spectrum (RGB + IR) enrollment with spectrum-gated
+voting: the worker measures room light per scan and picks the sensor
+automatically — dark rooms use IR, lit rooms use RGB. Liveness combines
+7 classical cues (glare, moire FFT, IR skin response, homography
+planarity, EAR blink, parallax, challenge-response) plus a passive
+MiniFASNet-V2 anti-spoof CNN (Apache-2.0 ONNX export, pinned by SHA-256
+in the manifest, loaded as one vote among several -- never as the
+authority). The pill lives in top chrome above the screen
+shield so the success animation survives the unlock.
+
+**Threat model:** Defends against printed photos, phone-screen replay,
+and video replay (classical liveness cues + IR + MiniFASNet-V2 passive
+CNN as one vote; treat video-replay defense as best-effort -- the CNN
+loses accuracy on cameras and lighting it was not trained on). Does NOT defend against
+masked attackers, twins, or adversarial perturbations. RGB-only mode is
+fundamentally spoofable — IR is what makes it credible. Any failure
+(camera, GPU, emitter, model) falls back to password; the system never
+fails open.
+
+**The three hardest problems:**
+
+1. **Spectrum-gated enrollment** — capturing and matching faces under
+   both RGB and IR, then voting per-spectrum so a dark room doesn't
+   force a re-enrollment.
+2. **The liveness stack** — 7 classical CV cues plus the MiniFASNet-V2
+   passive CNN vote, all running
+   in real-time on CPU with no false rejects
+   on legitimate users.
+3. **The PAM/daemon security boundary** — the worker is unprivileged
+   and never sees templates; the daemon never sees frames; the PAM
+   module does no AI. Password always works (`sufficient` flag).
+
 ## Before you download the `.deb` (prerequisites)
 
 - **Ubuntu 22.04+ (jammy) or Debian 12+**, on **amd64 or arm64**, with
@@ -60,7 +105,7 @@ faceid-nim installed. Face unlock is DISABLED.
 
   models    : ready
   landmarks : blink / 3D / attention checks active
-  anti-spoof: no ML model (screen/print/IR cues still active)
+  anti-spoof: active (MiniFASNet-V2 passive CNN, one vote among several)
   device   : CPU only
   camera   : /dev/video0 present (the app picks RGB/IR)
 ```
@@ -203,6 +248,79 @@ register both sensors under one UVC card name, and the mono-only node
 recognized as the IR camera. If no IR sensor exists, Automatic,
 explicit IR, and Hybrid all resolve to RGB with an in-app note — the
 app never silently burns a timeout on empty IR.
+
+## ML anti-spoof model (MiniFASNet-V2, optional)
+
+Most users can skip this section — the model installs and activates
+itself, and face unlock works with or without it. It exists for those
+who want to know what the extra liveness vote does, and for those who
+would rather turn it off.
+
+**What it is.** A passive anti-spoof CNN: given one 80×80 face crop it
+scores whether the face is live or a presentation attack (printed photo
+/ screen replay). It is one vote among the 7 classical cues, never the
+authority — a scan it flags still needs nothing else to pass, and a
+scan it clears can still be vetoed by glare, moiré, planarity or IR.
+
+| | |
+|---|---|
+| Model | MiniFASNet-V2 (`2.7_80x80`), ONNX opset 11, ~1.7 MB |
+| Source | `garciafido/minifasnet-v2-anti-spoofing-onnx` (Hugging Face) — a format conversion of the upstream `minivision-ai/Silent-Face-Anti-Spoofing` weights, bit-equivalent |
+| License | Apache-2.0, same as upstream |
+| Pin | SHA-256 in `models/manifest.toml`; the worker refuses to load a file that does not match |
+
+**Why use it.** The classical cues catch most print/screen replay, but
+they are hand-written heuristics. The CNN adds a learned
+texture/frequency opinion on top — defense in depth for machines in
+shared spaces, or for RGB-only laptops where there is no IR sensor to
+back the decision. If you have IR + `light`/`heavy` strictness on a
+personal laptop, the classical cues plus IR are already the strong
+combination; the CNN is a smaller gain there.
+
+**What changes when it is active.**
+
+* `sudo faceid-nim status` shows `antispoof: ok` and
+  `ML anti-spoof : active` instead of `unavailable`.
+* A scan that looks like a screen or print gets an `antispoof_model`
+  deny veto in the audit log (`sudo faceid-nim audit 20`) — same as any
+  other liveness veto: the attempt fails closed to password.
+* Cost: one extra CPU ONNX session per scan (~1.7 MB on disk,
+  milliseconds on CPU). No GPU, network, or account needed.
+
+**Setup (nothing to do on a fresh install).** The `.deb` postinst
+fetches and checksum-verifies it like every other model. To confirm on
+an existing install:
+
+```sh
+sudo cp models/manifest.toml /usr/share/faceid-nim/models/manifest.toml  # only if installed before 1.1.1
+sudo faceid-nim fetch-models     # downloads minifasnet_v2.onnx, verifies SHA-256
+sudo systemctl restart faceid-vision.service
+sudo faceid-nim status           # expect: antispoof: ok / ML anti-spoof: active
+```
+
+To prove it is really wired up, hold a phone screen with a photo of
+your face to the camera and run Test Scan — expect a reject with the
+`antispoof_model` cue in the audit log. Your real face must still pass.
+
+**Opting out.** Delete the file and restart the worker:
+
+```sh
+sudo rm /var/lib/faceid-nim/models/minifasnet_v2.onnx
+sudo systemctl restart faceid-vision.service
+```
+
+`status` then reports `ML anti-spoof: unavailable`, the deny cue never
+fires, and `verify-models` still passes (optional models are allowed to
+be absent). It stays off across reboots; only an explicit
+`sudo faceid-nim fetch-models` downloads it again.
+
+**Honest limits.** These models lose accuracy on cameras and lighting
+they were not trained on, which is exactly why it is one vote, not the
+decision. The veto threshold is fixed (spoof probability > 0.7) with no
+config knob today — if it ever false-rejects your real face in bad
+light, that is the opt-out above, plus an audit line to prove it. It
+does not replace IR: RGB-only mode stays fundamentally spoofable, CNN
+or not.
 
 ## Config reference
 

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Regenerate the glance video frames the lock screen plays.
+#
+# GNOME Shell (Clutter/St) cannot play mp4, so the glance opening is
+# shipped as a PNG frame sequence next to opening.js and flipped
+# through on the pill's own clock. Source of truth is the mp4 in
+# linux-anim/glance_anim/assets/ (copied from the Glance Resources
+# bundle); this script re-extracts it at 30fps/216px (pill glyphs are
+# 94-190px, so 216px stays sharp) into both extension copies.
+#
+# Usage: packaging/scripts/extract-glance-frames
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+SRC="linux-anim/glance_anim/assets/unlockanimation.mp4"
+DESTS=(
+    "shell-ext/faceid@nim/glance-frames"
+    "faceid-nim-dynamic-island/faceid-nim/shell-ext/faceid@nim/glance-frames"
+)
+
+command -v ffmpeg >/dev/null || {
+    echo "extract-glance-frames: ffmpeg not found" >&2; exit 1; }
+[ -f "$SRC" ] || {
+    echo "extract-glance-frames: $SRC missing" >&2; exit 1; }
+
+tmp="$(mktemp -d)"
+ffmpeg -y -v error -i "$SRC" \
+    -vf "fps=30,scale=216:216" -pix_fmt rgb24 \
+    "$tmp/frame-%03d.png"
+echo "extracted $(ls "$tmp"/*.png | wc -l) frames"
+
+for d in "${DESTS[@]}"; do
+    mkdir -p "$d"
+    rm -f "$d"/frame-*.png
+    cp "$tmp"/frame-*.png "$d/"
+    echo "wrote $d ($(du -sh "$d" | cut -f1))"
+done
+rm -rf "$tmp"

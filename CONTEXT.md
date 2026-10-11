@@ -130,10 +130,13 @@ the real installed layout, and `exec_module` without registering in
 an isolated interpreter).
 
 ## Left for the user (needs a machine, a face, or accounts)
-1. **Install and verify on the laptop.** `dist/faceid-nim_1.1.0-1_amd64.deb`
-   is built. `sudo apt install ./dist/faceid-nim_1.1.0-1_amd64.deb`, then
-   `sudo faceid-nim status` — expect `landmarks : mediapipe_tasks`, and
-   the model fetched automatically with no `fetch-models` command.
+1. **Install and verify on the laptop.** `dist/faceid-nim_1.1.1-1_amd64.deb`
+   built locally 2026-09-26 (`dpkg-buildpackage -b -d`; `-d` needed: cargo/
+   rustc are rustup-managed, invisible to dpkg-checkbuilddeps). Verified:
+   `Architecture: amd64`, real Maintainer, daemon/venv/fetch-models unit/
+   gpu-devices/app-launcher all inside. `sudo apt install
+   ./dist/faceid-nim_1.1.1-1_amd64.deb`, then `sudo faceid-nim status` —
+   expect `landmarks : mediapipe_tasks`, model fetched automatically.
 2. **Dark room / lit room.** Auto mode must give IR unlock in the dark
    and RGB unlock when lit. `sudo faceid-nim audit 20` for the reasons.
 3. **Measure tau per spectrum** (`eval/far_frr.py`). The shipped 0.40 is

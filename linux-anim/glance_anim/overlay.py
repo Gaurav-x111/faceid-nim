@@ -16,6 +16,7 @@ Public API for face-unlock app:
     overlay.set_style("minimal"); overlay.run() / overlay.show()
 """
 import math
+import sys
 import time
 
 from .controller import AnimController, Phase, ScanMedia, UnlockStyle
@@ -212,9 +213,24 @@ class GlanceAnimOverlay:
             gi.require_version("GtkLayerShell", "0.1")
             from gi.repository import GtkLayerShell as Layer
             has_layer = True
-        except Exception:
+        except (ImportError, ValueError) as exc:
+            # DO NOT swallow this. On Ubuntu every available
+            # gir1.2-gtklayershell-0.1 (noble 0.8.2-1build2 included)
+            # binds Gtk-3.0 while this overlay is GTK4, so the import
+            # raises and the window would silently become a plain,
+            # transparent Gtk.ApplicationWindow in the normal layer --
+            # effectively invisible. Say so once, then keep going as a
+            # layout-only fallback (the control panel still appears).
             Layer = None
             has_layer = False
+            print(
+                "glance_anim: GtkLayerShell unavailable, continuing "
+                f"WITHOUT layer-shell: {exc}. The overlay window will be "
+                "a plain transparent window, not an on-top pill. Ubuntu "
+                "ships no GTK4 layer-shell; one must be built from source.",
+                file=sys.stderr,
+                flush=True,
+            )
 
         win = Gtk.ApplicationWindow(application=app)
         win.set_decorated(False)

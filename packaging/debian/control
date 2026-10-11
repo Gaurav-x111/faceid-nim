@@ -2,8 +2,22 @@ Source: faceid-nim
 Section: admin
 Priority: optional
 Maintainer: Gaurav-x111 <gauravshah0777@gmail.com>
-Build-Depends: debhelper, cargo, rustc (>= 1.75), libpam0g-dev,
- meson, ninja-build, python3-all, python3-venv
+Build-Depends: debhelper, cargo (>= 1.85), rustc (>= 1.85), libpam0g-dev,
+ meson, ninja-build, python3-all, python3-venv, libgl1,
+ libglib2.0-0 | libglib2.0-0t64
+# libgl1/glib above are for the BUILD smoke check: the liveness extra
+# pulls mediapipe, which depends on opencv-contrib-python (the GUI
+# build), whose cv2.so links libGL/libglib. A minimal build container
+# lacks them and `import cv2` fails (proven 2026-10-07: libGL.so.1).
+# The same libs are in Depends below for GUI-less runtime systems.
+# curl|wget below is for the same reason: fetch-models needs one of
+# them, and minimal systems (proven 2026-10-07: clean 24.04 container
+# prints "fetch-models: need curl or wget" and fetches nothing).
+# NOTE on the 1.85 floor: the daemon's lockfile contains edition2024
+# crates (zeroize_derive 1.5), which older cargo cannot parse. Ubuntu
+# <= 24.04 apt toolchains top out at 1.75, so an apt-only stock build
+# cannot satisfy this on any supported release: use a rustup toolchain
+# and pass DEB_FLAGS=-d (see Makefile), which is also what CI does.
 Standards-Version: 4.6.2
 Homepage: https://github.com/Gaurav-x111/faceid-nim
 Vcs-Git: https://github.com/Gaurav-x111/faceid-nim.git
@@ -26,9 +40,9 @@ Package: faceid-nim
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, libpam-runtime, python3 (>= 3.10),
  python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, gir1.2-gdkpixbuf-2.0,
- policykit-1 | polkitd, dbus, adduser, libglib2.0-bin
+ polkitd | policykit-1, dbus, adduser, libglib2.0-bin,
+ libgl1, libglib2.0-0 | libglib2.0-0t64, curl | wget
 Recommends: gnome-shell (>= 45)
-Suggests: linux-enable-ir-emitter
 Description: Face unlock for Ubuntu with a lock-screen animation
  Face unlock via PAM, backed by a privileged daemon and an unprivileged
  vision worker, with a GNOME Shell pill showing scan state.

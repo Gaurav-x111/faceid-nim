@@ -26,6 +26,7 @@ mod worker;
 use anyhow::{Context, Result};
 use config::Config;
 use session::{Engine, ScanState};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -74,6 +75,7 @@ async fn main() -> Result<()> {
         audit: audit.clone(),
         state_tx,
         scan_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        auth_locks: Arc::new(Mutex::new(HashMap::new())),
     });
 
     // D-Bus is best-effort: if the bus is unavailable the pill and the

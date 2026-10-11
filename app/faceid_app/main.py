@@ -251,11 +251,21 @@ class Window(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application, daemon: Daemon):
         super().__init__(application=app, title="Face Unlock",
                          default_width=860, default_height=620)
+        # Audit 2026-10-06: a floor stops resize-induced overlap. The
+        # sidebar alone wants 236 px; 640x480 keeps every page readable.
+        self.set_size_request(640, 480)
         self.daemon = daemon
         self.toasts = Adw.ToastOverlay()
         log = logging.getLogger("faceid_app")
 
         self._settings_cache: dict = {}
+        # Last known landmark-backend state from diagnostics: True =
+        # landmarks live, False = known-unavailable, None = unknown
+        # (daemon unreachable or no diagnostics yet). The heavy-strictness
+        # gate reads this; it is refreshed on every _apply_refresh.
+        self._landmarks_ok: bool | None = None
+        # One-shot bypass for the heavy gate after explicit confirmation.
+        self._heavy_override = False
         self._id_rows: list = []
         self._diag_rows: list = []
         self._cam_rows: list = []
@@ -266,6 +276,12 @@ class Window(Adw.ApplicationWindow):
         self._scanface_notify_id = 0
         self._refresh_generation = 0
         self._prefs = prefs.load()
+        if not prefs.has_user_value("animations_enabled"):
+            # First run: match the desktop's reduced-motion setting
+            # instead of defaulting the lock-screen animation on
+            # (round-2 audit). An explicit toggle afterwards wins.
+            self._prefs["animations_enabled"] = self._system_motion_ok()
+            prefs.save(self._prefs)
         self._openings = openings.load()
         self._editor_logo_path = ""
         self._plan = None
@@ -463,6 +479,18 @@ class Window(Adw.ApplicationWindow):
     def _settings_page(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
 
+        # Audit 2026-10-06: Settings used to fall back to defaults with
+        # only a transient toast when the daemon was down. The warning
+        # group below matches the Diagnostics "Cannot reach the daemon"
+        # pattern; hidden unless a refresh actually failed.
+        self.settings_warn_group = Adw.PreferencesGroup()
+        self.settings_warn_group.add(Adw.ActionRow(
+            title="Cannot reach the daemon",
+            subtitle="Settings show defaults and cannot be saved. "
+                     "Run: faceid-nim status"))
+        self.settings_warn_group.set_visible(False)
+        page.add(self.settings_warn_group)
+
         g = Adw.PreferencesGroup(title="Face unlock")
         self.cb_strict = Adw.ComboRow(
             title="Strictness",
@@ -643,6 +671,15 @@ class Window(Adw.ApplicationWindow):
 
     def _security_page(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
+        # Same daemon-down pattern as Settings: the page is otherwise
+        # static, so a down daemon only surfaced post-click as a toast.
+        self.sec_warn_group = Adw.PreferencesGroup()
+        self.sec_warn_group.add(Adw.ActionRow(
+            title="Cannot reach the daemon",
+            subtitle="Removing face data may fail until the service is "
+                     "back. Run: faceid-nim status"))
+        self.sec_warn_group.set_visible(False)
+        page.add(self.sec_warn_group)
         grp = Adw.PreferencesGroup(title="What Face Unlock is not")
         grp.add(Adw.ActionRow(
             title="This is a convenience feature, not Face ID",
@@ -875,6 +912,13 @@ class Window(Adw.ApplicationWindow):
         worker_up = bool(diag.get("worker_reachable"))
         models_ready = diag.get("models_ready")
         live = self._liveness_health(diag)
+        # Cache for the heavy-strictness gate in on_setting_changed.
+        liveness = diag.get("liveness")
+        self._landmarks_ok = (bool(liveness.get("landmarks_ok"))
+                              if isinstance(liveness, dict) else None)
+        daemon_down = bool(errors)
+        self.settings_warn_group.set_visible(daemon_down)
+        self.sec_warn_group.set_visible(daemon_down)
         if not s.get("enabled"):
             self._set_status("warn", "Face unlock is off")
         elif not ids:
@@ -894,6 +938,11 @@ class Window(Adw.ApplicationWindow):
         for k, v in diag.items():
             r = Adw.ActionRow(title=prefs.diag_title(k),
                               subtitle=self._diag_value(v))
+            # Long values (provider lists, model paths) wrap instead of
+            # running off the window, and stay selectable for copying
+            # into a terminal (round-2 audit).
+            r.set_subtitle_lines(3)
+            r.set_subtitle_selectable(True)
             self.diag_group.add(r)
             self._diag_rows.append(r)
         if not diag:
@@ -963,9 +1012,10 @@ class Window(Adw.ApplicationWindow):
 
         sel = Adw.PreferencesGroup(
             title="Opening animation",
-            description="Glance video pill is the default — a spring pill "
-                        "with unlock videos (linux-anim). The choice applies "
-                        "at the very next lock — no extension reload, no restart.")
+            description="Glance video pill is the default — the real "
+                        "unlock video, playing on the lock screen. The "
+                        "choice applies at the very next lock — no "
+                        "extension reload, no restart.")
         self.cb_opening = Adw.ComboRow(
             title="Active animation",
             subtitle="Pick how the lock screen begins",
@@ -1021,13 +1071,15 @@ class Window(Adw.ApplicationWindow):
 
         pvgroup = Adw.PreferencesGroup(
             title="Preview",
-            description="Glance video pill is the default opening. Watch it "
-                        "here (separate test window), or play the lock-pill "
-                        "Verified → Welcome sequence on the real pill. Both "
-                        "are previews only — no camera, no authentication.")
+            description="Glance video pill is the default opening. Watch "
+                        "the full mp4 here (separate test window), play "
+                        "the selected opening inline, or play the "
+                        "lock-pill Verified → Welcome sequence on the "
+                        "real pill. All are previews only — no camera, no "
+                        "authentication.")
         vrow = Adw.ActionRow(
-            title="Preview video pill (default)",
-            subtitle="Glance-style spring pill with unlock videos "
+            title="Preview video pill (mp4)",
+            subtitle="Full Glance unlock video "
                      "(linux-anim test window)")
         vb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
         vb.add_css_class("suggested-action")
@@ -1157,9 +1209,7 @@ class Window(Adw.ApplicationWindow):
             self.cb_opening.set_model(Gtk.StringList.new(names))
             active = cfg.get("active") or "glance"
             if active in ids:
-                GLib.idle_add(
-                    lambda idx=ids.index(active):
-                        self.cb_opening.set_selected(idx))
+                self.cb_opening.set_selected(ids.index(active))
         finally:
             self._block_opening_signals(False)
             self._suspend_changes = False
@@ -1246,10 +1296,19 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(_later)
 
     def _draw_opening_preview(self, area, cr, w, h, _data) -> None:
-        s = openings.spec(self._openings,
-                          self._openings.get("active") or "glance") or {}
+        ms = getattr(area, "_preview_ms", None)
+        self._draw_opening_preview_at(cr, w, h, ms)
+
+    def _draw_opening_preview_at(self, cr, w, h, ms=None) -> None:
+        """Static frame (ms=None shows the settled end-state) or one
+        animated frame ms after the splash start. Mirrors the lock
+        screen: glance = video halo hint (the mp4 plays in the inline
+        preview), logo = fade, glow = halo, none = empty pill."""
+        active = self._openings.get("active") or "glance"
+        s = openings.spec(self._openings, active) or {}
         bg = _rgba_tuple(s.get("bg") or "rgba(14, 18, 26, 0.82)")
         accent = _rgba_tuple(s.get("accent") or "#a5d8ff")
+        cr.save()
         cr.scale(w, h)
         radius = 0.5
         cr.move_to(radius, 0.0)
@@ -1263,24 +1322,50 @@ class Window(Adw.ApplicationWindow):
         cr.set_line_width(0.02)
         cr.set_source_rgba(*accent)
         cr.stroke()
+        # Opacity/scale for this frame. Settles at 1 when ms is None.
+        if active == "none":
+            cr.restore()
+            return
+        if ms is None:
+            alpha, pop = 1.0, 1.0
+        elif active == "glance":
+            enter = min(max(ms / 420.0, 0.0), 1.0)
+            e = 1 - pow(1 - enter, 3)
+            # outBack spring to match opening.js tick().
+            c1, c3 = 1.70158, 2.70158
+            x = enter - 1
+            back = 1 + c3 * x * x * x + c1 * x * x
+            pop = 0.72 + 0.28 * max(back, 0.0)
+            breathe = 0.0
+            if ms > 420:
+                t = min(max(ms / 900.0, 0.0), 1.0)
+                breathe = (math.sin((ms - 420) / 1000
+                                    * math.pi * 2 * 2) * 0.06
+                           * (1 - t * 0.4))
+            pop += breathe
+            alpha = max(e * (1 + min(breathe, 0.0) * 1.6), 0.0)
+        else:
+            fade = max(int(s.get("fade_ms") or 420), 1)
+            t = min(max(ms / fade, 0.0), 1.0)
+            alpha = 1 - pow(1 - t, 3)
+            pop = 0.85 + 0.15 * alpha if s.get("scale") else 1.0
+        cr.set_source_rgba(accent[0], accent[1], accent[2],
+                           accent[3] * max(min(alpha, 1.0), 0.0))
         if s.get("ring"):
-            cr.set_source_rgba(*accent)
-            cr.arc(0.36, 0.5, 0.22, 0, 2 * math.pi)
+            cr.arc(0.36, 0.5, 0.22 * pop, 0, 2 * math.pi)
             cr.set_line_width(0.03)
             cr.stroke()
-        elif (self._openings.get("active") or "glance") == "glance":
-            # Default video-pill hint: halo + centre dot (spring pill
-            # with unlock videos — see Preview video pill).
-            cr.set_source_rgba(*accent)
-            cr.arc(0.36, 0.5, 0.22, 0, 2 * math.pi)
+        elif active == "glance":
+            # Halo + centre dot: the spring-pill look.
+            cr.arc(0.36, 0.5, 0.22 * pop, 0, 2 * math.pi)
             cr.set_line_width(0.03)
             cr.stroke()
-            cr.arc(0.36, 0.5, 0.10, 0, 2 * math.pi)
+            cr.arc(0.36, 0.5, 0.10 * pop, 0, 2 * math.pi)
             cr.fill()
         else:
-            cr.set_source_rgba(*accent)
-            cr.arc(0.36, 0.5, 0.12, 0, 2 * math.pi)
+            cr.arc(0.36, 0.5, 0.12 * pop, 0, 2 * math.pi)
             cr.fill()
+        cr.restore()
 
     def on_opening_selected(self, *_a) -> None:
         if self._suspend_changes:
@@ -1289,6 +1374,8 @@ class Window(Adw.ApplicationWindow):
         ids = openings.all_ids(self._openings)
         if 0 <= idx < len(ids):
             vid = ids[idx]
+            if self._openings.get("active") == vid:
+                return
             if openings.set_active(self._openings, vid):
                 # Cheap bits now (no signals involved); the model
                 # rebuild is deferred past this emission — doing it
@@ -1302,35 +1389,85 @@ class Window(Adw.ApplicationWindow):
                            "(next lock)")
 
     def _preview_opening_inline(self, _b=None) -> None:
-        """Play the selected opening animation in a small inline window."""
-        s = openings.spec(self._openings,
-                          self._openings.get("active") or "glance") or {}
+        """Play the selected opening animation in a dialog.
+
+        Glance plays the real mp4 (the same unlock video the lock
+        screen flips through as frames). Everything else previews with
+        the same timing as the lock screen, looping until closed, so
+        the choice can be judged before the next lock."""
+        active = self._openings.get("active") or "glance"
+        s = openings.spec(self._openings, active) or {}
         if not s:
             self.toast("No animation selected")
             return
+        if active == "none":
+            self.toast("“No splash” selected — nothing to preview")
+            return
 
+        mp4 = ""
+        if active == "glance":
+            mp4 = openings.glance_asset(
+                openings.GLANCE_CLIPS.get("glance", ""))
         dlg = Adw.AlertDialog(
             heading=s.get("name") or "Animation",
-            body="Preview of the selected opening animation.")
+            body=("The real unlock video — same clip the lock screen "
+                  "plays. Loops until closed." if mp4 else
+                  "Live preview — same timing as the lock screen. "
+                  "Loops until closed."))
         dlg.add_response("close", "Close")
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                      width_request=300, height_request=120)
+                      width_request=300, height_request=140)
         box.set_valign(Gtk.Align.CENTER)
         box.set_halign(Gtk.Align.CENTER)
 
-        preview = Gtk.DrawingArea(width_request=280, height_request=80)
-        preview.add_css_class("opening-preview")
-        preview.set_draw_func(self._draw_opening_preview, None)
-        box.append(preview)
+        if mp4:
+            video = Gtk.Video.new_for_filename(mp4)
+            video.set_autoplay(True)
+            video.set_loop(True)
+            video.set_size_request(280, 280)
+            box.append(video)
+        else:
+            preview = Gtk.DrawingArea(width_request=280, height_request=80)
+            preview.add_css_class("opening-preview")
+            start = GLib.get_monotonic_time()
+
+            def draw(area, cr, w, h, _data):
+                now_ms = (GLib.get_monotonic_time() - start) / 1000
+                period = 1600 if active == "glance" else max(
+                    int(s.get("fade_ms") or 420) + 700, 900)
+                self._draw_opening_preview_at(cr, w, h, now_ms % period)
+            preview.set_draw_func(draw, None)
+            box.append(preview)
 
         label = Gtk.Label(label=s.get("description") or "")
         label.add_css_class("dim-label")
         label.set_wrap(True)
         box.append(label)
 
-        dlg.set_extra_child(box)
-        dlg.connect("response", lambda _d, _r: dlg.close())
+        tick_id = {"id": 0}
+
+        if not mp4:
+            def _tick():
+                try:
+                    preview.queue_draw()
+                except Exception:
+                    return False
+                return True
+
+            tick_id["id"] = GLib.timeout_add(33, _tick)
+        self.preview_area.queue_draw()
+
+        def _done(_d, _r):
+            try:
+                if tick_id["id"]:
+                    GLib.source_remove(tick_id["id"])
+            except Exception:
+                pass
+            tick_id["id"] = 0
+            dlg.close()
+
+        dlg.connect("response", _done)
         dlg.present(self)
 
     def _preview_success(self, _b=None) -> None:
@@ -1365,12 +1502,25 @@ class Window(Adw.ApplicationWindow):
         Standalone subprocess on purpose: the harness owns its own
         Gtk.Application + LayerShell window, so a crash or missing
         codec can never take the settings app down with it.
+        Checks the harness AND its mp4/png assets first so a missing
+        install shows a real reason instead of a silent nothing.
         """
         harness = _find_video_pill_harness()
         if not harness:
             self.toast("Video-pill harness not found (linux-anim/)")
             logging.getLogger("faceid_app").warning(
                 "video pill preview: harness missing")
+            return
+        base = os.path.dirname(os.path.normpath(harness))
+        asset_dir = os.path.join(base, "glance_anim", "assets")
+        want = ("unlockanimation.mp4", "unsuccessfulunlockanimation.mp4",
+                "unlockstatic.png")
+        missing = [f for f in want
+                   if not os.path.isfile(os.path.join(asset_dir, f))]
+        if missing:
+            self.toast(f"Video assets missing: {', '.join(missing)}")
+            logging.getLogger("faceid_app").warning(
+                "video pill preview: missing %s in %s", missing, asset_dir)
             return
 
         def run():
@@ -1961,6 +2111,17 @@ class Window(Adw.ApplicationWindow):
         if sel == Gtk.INVALID_LIST_POSITION:
             sel = 1
         strict = ["off", "light", "heavy"][min(sel, 2)]
+        prev = str(s.get("strictness", "light"))
+        # Audit 2026-10-06: heavy without landmarks rejects every real
+        # attempt ("no liveness confirmation"), so selecting it blind
+        # locks the user into a mode that can never unlock. Require an
+        # explicit confirmation instead of writing it unconditionally.
+        if (strict == "heavy" and prev != "heavy"
+                and self._landmarks_ok is False
+                and not getattr(self, "_heavy_override", False)):
+            self._confirm_heavy_without_landmarks(prev)
+            return
+        self._heavy_override = False
         s["strictness"] = strict
         s["scan_timeout_ms"] = int(self.sp_timeout.get_value())
         s["require_attention"] = self.sw_attention.get_active()
@@ -1983,6 +2144,38 @@ class Window(Adw.ApplicationWindow):
         else:
             self._set_settings_async(s, saved)
 
+    def _confirm_heavy_without_landmarks(self, prev: str) -> None:
+        dlg = Adw.AlertDialog(
+            heading="Heavy strictness needs landmarks",
+            body="The landmark model is unavailable, so Heavy cannot be "
+                 "satisfied: every face attempt will be rejected until it "
+                 "is installed (sudo faceid-nim fetch-models). "
+                 "Switch to Heavy anyway?")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("heavy", "Use heavy anyway")
+        dlg.set_response_appearance("heavy",
+                                    Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_d, r):
+            if r != "heavy":
+                # Back out: restore the previous selection without
+                # re-triggering the save path.
+                self._suspend_changes = True
+                try:
+                    if prev in ("off", "light", "heavy"):
+                        self.cb_strict.set_selected(
+                            ("off", "light", "heavy").index(prev))
+                    self._update_strict_note(prev)
+                finally:
+                    self._suspend_changes = False
+                return
+            # Confirmed: one-shot bypass, then re-drive the save.
+            self._heavy_override = True
+            self.on_setting_changed()
+
+        dlg.connect("response", on_response)
+        dlg.present(self)
+
     def on_speak_changed(self, *_a) -> None:
         if self._suspend_changes:
             return
@@ -1990,6 +2183,19 @@ class Window(Adw.ApplicationWindow):
         prefs.save(self._prefs)
         self.toast("Greeting speech on" if self._prefs["speak_greeting"]
                    else "Greeting speech off")
+
+    @staticmethod
+    def _system_motion_ok() -> bool:
+        """Desktop reduced-motion setting. Fail-open to True (animations
+        on, the historical default) when GTK settings are unreadable,
+        e.g. in headless tests — never fail-closed into surprising UI."""
+        try:
+            settings = Gtk.Settings.get_default()
+            if settings is None:
+                return True
+            return bool(settings.get_property("gtk-enable-animations"))
+        except Exception:
+            return True
 
     def on_animations_changed(self, *_a) -> None:
         if self._suspend_changes:

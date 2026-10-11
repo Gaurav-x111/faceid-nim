@@ -50,6 +50,38 @@ def variant_dir(variant_id: str) -> str:
     return os.path.join(openings_dir(), _valid_id(variant_id))
 
 
+# -- glance video assets ------------------------------------------------
+# The glance opening is the real unlock video. The app previews it with
+# Gtk.Video straight from the mp4; the lock screen (which cannot play
+# video) uses the extracted PNG frame sequence shipped next to its
+# opening.js (see packaging/scripts/extract-glance-frames).
+
+_GLANCE_ASSET_DIRS = (
+    os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "linux-anim", "glance_anim", "assets")),
+    "/usr/share/faceid-nim/linux-anim/glance_anim/assets",
+    "/usr/share/glance-anim/assets",
+)
+
+GLANCE_CLIPS = {
+    "glance": "unlockanimation.mp4",
+    "success": "unlockanimation.mp4",
+    "failure": "unsuccessfulunlockanimation.mp4",
+    "idle": "unlockstatic.png",
+}
+
+
+def glance_asset(name: str) -> str:
+    """Absolute path to a glance asset (mp4/png), or "" when missing."""
+    base = os.path.basename(name)
+    for d in _GLANCE_ASSET_DIRS:
+        p = os.path.join(d, base)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
 # -- schema -------------------------------------------------------------
 
 EASINGS = ["outCubic", "outBack", "outExpo"]
@@ -64,8 +96,7 @@ BUILTIN = {
     "glance": {
         "kind": "builtin",
         "name": "Glance Video Pill",
-        "description": "Spring pill with unlock videos (linux-anim) — "
-                       "the default opening animation.",
+        "description": "The real unlock video, playing on the lock screen.",
     },
     "logo": {
         "kind": "builtin",

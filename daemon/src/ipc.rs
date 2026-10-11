@@ -16,11 +16,19 @@ use std::io;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{unix::OwnedReadHalf, UnixListener, UnixStream};
 
 const MAX_LINE: usize = 8 * 1024;
 const MAX_CONNECTIONS: usize = 64;
+/// Idle-read budget for one auth request line (audit BLOCKER 2): well
+/// under the PAM module's 8 s default deadline, so a client that
+/// connects and sends nothing (slow-loris) is reaped and its
+/// connection permit freed instead of wedging one of the 64 slots
+/// forever. Sized to leave room for the scan itself after the line
+/// arrives; the PAM side still enforces its own overall deadline.
+const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -63,9 +71,12 @@ pub async fn serve(path: &Path, engine: Arc<Engine>) -> Result<()> {
             Err(_) => return Ok(()),
         };
         let engine = engine.clone();
+        // Snapshot occupancy for the slow-loris log line in handle():
+        // permits held right now (this connection included).
+        let in_use = MAX_CONNECTIONS.saturating_sub(connections.available_permits());
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = handle(stream, engine).await {
+            if let Err(e) = handle(stream, engine, in_use).await {
                 tracing::debug!("auth session ended: {e}");
             }
         });
@@ -120,8 +131,9 @@ async fn read_line_limited(rd: &mut OwnedReadHalf) -> io::Result<Option<Vec<u8>>
     }
 }
 
-async fn handle(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
+async fn handle(stream: UnixStream, engine: Arc<Engine>, in_use: usize) -> Result<()> {
     let caller = peer_uid(&stream);
+    let connected_at = Instant::now();
     let (mut rd, mut wr) = stream.into_split();
 
     async fn reply(
@@ -136,10 +148,23 @@ async fn handle(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
         Ok(())
     }
 
-    let line = match read_line_limited(&mut rd).await {
-        Ok(Some(line)) => line,
-        Ok(None) => return Ok(()),
-        Err(e) => {
+    let line = match tokio::time::timeout(IDLE_READ_TIMEOUT, read_line_limited(&mut rd)).await {
+        // Slow-loris: connected but never completed a request line.
+        // Close without replying; dropping the stream frees the permit.
+        Err(_) => {
+            tracing::info!(
+                "auth idle timeout: caller={:?} held {}/{} connections for {:?}; \
+                 connection closed, permit freed",
+                caller,
+                in_use,
+                MAX_CONNECTIONS,
+                connected_at.elapsed(),
+            );
+            return Ok(());
+        }
+        Ok(Ok(Some(line))) => line,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(e)) => {
             let _ = reply(&mut wr, "unavail", "bad request").await;
             tracing::debug!("auth request rejected: {e}");
             return Ok(());
@@ -192,6 +217,13 @@ async fn handle(stream: UnixStream, engine: Arc<Engine>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::Audit;
+    use crate::config::Config;
+    use crate::policy::Policy;
+    use crate::store::Store;
+    use crate::worker::Worker;
+    use std::collections::HashMap;
+    use tokio::sync::{mpsc, Mutex, Semaphore};
 
     #[tokio::test]
     async fn reads_a_bounded_line() {
@@ -215,5 +247,45 @@ mod tests {
         let err = read_line_limited(&mut rd).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         writer.await.unwrap();
+    }
+
+    /// Audit BLOCKER 2 verification: a client that connects and sends
+    /// nothing must be reaped within IDLE_READ_TIMEOUT (permit freed,
+    /// no hang), not held forever. The worker socket is bogus on
+    /// purpose: authenticate() must never run on this path.
+    #[tokio::test]
+    async fn idle_connection_is_closed_within_timeout() {
+        let dir = std::env::temp_dir().join(format!("faceid-idle-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (state_tx, _state_rx) = mpsc::channel(4);
+        let engine = Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(Config::default())),
+            store: Arc::new(Store::open(&dir.join("store")).unwrap()),
+            worker: Arc::new(Worker::new(dir.join("no-worker.sock"))),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit: Arc::new(Audit::new(&dir.join("audit.log"))),
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let start = Instant::now();
+        handle(server, engine, 1).await.expect("handle returns Ok");
+        let held = start.elapsed();
+        assert!(
+            held >= IDLE_READ_TIMEOUT,
+            "must wait out the idle budget, held only {held:?}"
+        );
+        assert!(
+            held < IDLE_READ_TIMEOUT + Duration::from_secs(5),
+            "must not hang past the budget, held {held:?}"
+        );
+        // Server closed its end: the client must observe EOF.
+        let mut buf = [0u8; 8];
+        let n = client.read(&mut buf).await.expect("client read");
+        assert_eq!(n, 0, "idle connection must be closed (EOF), not left open");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

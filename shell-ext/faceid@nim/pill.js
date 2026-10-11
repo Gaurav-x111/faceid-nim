@@ -176,9 +176,12 @@ class FaceIdPill extends St.Widget {
         this.add_child(this._glyph);
 
         // The opening splash is owned by OpeningScene; the HUD hosts its
-        // logo widget so it plays centred inside the scan square.
+        // logo widget so it plays centred inside the scan square, plus
+        // its video actor for the glance frame sequence (hidden unless
+        // the glance video is actually playing).
         this._opening = new OpeningScene();
         this.add_child(this._opening.widget);
+        this.add_child(this._opening.videoWidget);
 
         // Status line under the scanner.
         this._label = new St.Label({ style_class: 'faceid-status',
@@ -292,6 +295,13 @@ class FaceIdPill extends St.Widget {
     // ---- public API ---------------------------------------------------
 
     startScanning(reason = null) {
+        // Audit 2026-10-06 (stale-card carryover): a new scan must never
+        // inherit _card/_failCard visibility, transforms, or glyph phase
+        // from a prior result. reset() is the complete scrub (cards
+        // hidden, transforms zeroed, glyph back to rays, clock stopped);
+        // _show() below then re-shows and restarts from idle, so every
+        // scan -- including hover-retry -- starts from a clean slate.
+        this.reset();
         // "Opening the laptop" -- the greeting only belongs to login and
         // lock-screen unlocks, captured *now* because the screen shield
         // drops mid-success and the check must not race it. A sudo/polkit
@@ -629,6 +639,14 @@ class FaceIdPill extends St.Widget {
         const lh = this._opening.widget.height;
         this._opening.widget.x = Math.round((ISLAND_W - lw) / 2);
         this._opening.widget.y = ISLAND_PAD_TOP + Math.round((GLYPH_SIZE - lh) / 2);
+
+        // Glance video frames play glyph-sized, centred in the same
+        // scan square (the frames are square; content scales to fit).
+        const vw = this._opening.videoWidget;
+        vw.width = GLYPH_SIZE;
+        vw.height = GLYPH_SIZE;
+        vw.x = Math.round((ISLAND_W - GLYPH_SIZE) / 2);
+        vw.y = ISLAND_PAD_TOP;
 
         // Centre the ✓ inside the circular success icon and the × inside
         // the failure icon (plain St.Widget children sit at 0,0).

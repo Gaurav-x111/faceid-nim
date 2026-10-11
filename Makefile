@@ -56,12 +56,14 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/share/applications
 	install -m 0644 app/data/org.faceidnim.App.desktop $(DESTDIR)$(PREFIX)/share/applications/
 
-# DEB_FLAGS exists because Build-Depends lists `cargo` and `rustc`, and
-# the only way to get a toolchain new enough for the daemon is rustup --
-# which does NOT install dpkg packages. dpkg-checkbuilddeps therefore
-# fails on every machine (including a stock CI runner) even though cargo
-# is present and working. Pass DEB_FLAGS=-d there. Leave it empty
-# locally, where you want the real check.
+# DEB_FLAGS exists because Build-Depends needs cargo/rustc >= 1.85 (the
+# daemon's lockfile contains edition2024 crates), and no supported
+# Ubuntu release ships that via apt (24.04 tops out at 1.75, 22.04 at
+# 1.59) -- the only way to get a new-enough toolchain is rustup, which
+# does NOT install dpkg packages. dpkg-checkbuilddeps therefore fails on
+# every machine (including a stock CI runner) even though cargo is
+# present and working. Pass DEB_FLAGS=-d there. Leave it empty locally
+# only if your apt toolchain really is >= 1.85, where you want the check.
 DEB_FLAGS ?=
 
 deb:

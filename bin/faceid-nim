@@ -28,7 +28,7 @@ Usage: faceid-nim <command> [options]
   audit             Show recent auth audit events (requires root)
   timeline          Show opt-in lock/unlock timeline (requires root)
   check-updates     Check models/manifest for updates (no download)
-  ir-emitter        Probe/enable the IR emitter (needs linux-enable-ir-emitter)
+  ir-emitter        Report IR sensor + illuminator status (probe-only)
   devices           List /dev/video* with RGB/IR classification
 
 Face unlock is enabled in the Face Unlock app, not here.
@@ -90,12 +90,22 @@ case "$cmd" in
         echo "  fetch-models   : $(unit_state faceid-nim-fetch-models.service)"
         echo
         echo "Sockets"
-        for s in /run/faceid-nim/auth.sock /run/faceid-nim/worker/vision.sock; do
-            if [ -S "$s" ]; then
-                echo "  $s : present"
+        # Audit 2026-10-06: the worker dir is 0770 root:faceid, so a
+        # non-root caller cannot even traverse it -- and a plain -S
+        # test then reports MISSING for a live worker. Distinguish
+        # "absent" from "invisible" instead of implying the worker
+        # is down.
+        sock_state() {
+            if [ -S "$1" ]; then
+                echo "present"
+            elif [ ! -x "$(dirname "$1")" ]; then
+                echo "not visible (permission denied - run as root to check)"
             else
-                echo "  $s : MISSING"
+                echo "MISSING"
             fi
+        }
+        for s in /run/faceid-nim/auth.sock /run/faceid-nim/worker/vision.sock; do
+            echo "  $s : $(sock_state "$s")"
         done
         echo
         echo "Models"
@@ -157,7 +167,12 @@ print(f'  ir sensor      : '
       f'{"configured" if c.get("ir") else "not configured"}')
 PY
         else
-            echo "  worker not running; cannot report what is active"
+            case "$(sock_state /run/faceid-nim/worker/vision.sock)" in
+                *permission*)
+                    echo "  worker status unknown (permission denied - run as root to check)" ;;
+                *)
+                    echo "  worker not running; cannot report what is active" ;;
+            esac
         fi
         echo
         echo "Config ($CONFIG)"
