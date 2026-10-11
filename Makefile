@@ -16,7 +16,7 @@ pam:
 
 test:
 	cd daemon && cargo test
-	PYTHONPATH=vision:app python3 -m pytest -q vision/tests app/tests
+	PYTHONPATH=vision:app python3 -m pytest -q vision/tests app/tests eval/tests
 
 install: all
 	install -d $(DESTDIR)$(LIBEXEC) $(DESTDIR)$(SECURITYDIR)

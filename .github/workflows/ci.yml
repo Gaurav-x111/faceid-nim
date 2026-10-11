@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -e './vision[dev]'
-      - run: PYTHONPATH=vision:app pytest -q vision/tests app/tests
+      - run: PYTHONPATH=vision:app pytest -q vision/tests app/tests eval/tests
 
   # The one CI job that would have caught the class of bug that shipped a
   # worker whose build_engine could not run: a syntax error in a module
@@ -89,6 +89,11 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install -e './vision[dev]'
       - name: Replay fixtures
+        # FACEID_DEV=1: fixtures run against whatever models the venv
+        # has, without checksum pins -- acceptable for a CI smoke run
+        # over recorded clips, never a product number. --no-verify is
+        # refused without it (see eval/apcer_bpcer.py).
+        env: { FACEID_DEV: "1" }
         run: |
           if [ -d eval/fixtures ]; then
             python eval/apcer_bpcer.py --root eval/fixtures --strict heavy --no-verify
