@@ -583,22 +583,17 @@ impl Daemon1 {
 
     /// Opt-in lock/unlock timeline as JSON (newest last, max 200).
     /// Only lock/unlock services are ever stored; sudo/polkit never is.
-    async fn get_timeline(&self) -> zbus::fdo::Result<String> {
+    /// Scoped to the calling user: every row carries the uid it was
+    /// recorded for, and a caller sees only their own rows (1B-1).
+    async fn get_timeline(
+        &self,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let uid = self.caller_uid(&hdr).await?;
         let cfg = self.cfg.lock().await.clone();
         let path = cfg.timeline_log;
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().collect();
-        let tail = if lines.len() > 200 {
-            &lines[lines.len() - 200..]
-        } else {
-            &lines[..]
-        };
-        let mut out = Vec::with_capacity(tail.len());
-        for l in tail {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
-                out.push(v);
-            }
-        }
+        let out = timeline_rows_for_caller(&text, uid);
         serde_json::to_string(&out).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
@@ -778,5 +773,67 @@ pub async fn run_signal_pump(conn: Connection, mut rx: mpsc::Receiver<(ScanState
         if let Err(e) = Daemon1::scan_state(&ctxt, state.as_str(), progress as f64, &reason).await {
             tracing::debug!("scan_state emit failed: {e}");
         }
+    }
+}
+
+/// Parse the tail of a timeline JSONL file into the rows one caller may
+/// see: at most the last 200 lines, JSON-parseable, and recorded for
+/// `uid`. Rows without a matching numeric `uid` field are dropped rather
+/// than leaked (fail closed: the writer always records a uid, so a
+/// missing one means a foreign or corrupt line).
+pub fn timeline_rows_for_caller(text: &str, uid: u32) -> Vec<serde_json::Value> {
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = if lines.len() > 200 {
+        &lines[lines.len() - 200..]
+    } else {
+        &lines[..]
+    };
+    let mut out = Vec::with_capacity(tail.len());
+    for l in tail {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
+            if v.get("uid").and_then(|u| u.as_u64()) == Some(uid as u64) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(uid: u32, service: &str) -> String {
+        serde_json::json!({"ts": 1, "uid": uid, "service": service, "result": "success"})
+            .to_string()
+    }
+
+    /// 1B-1 regression: a caller must never see another user's rows.
+    #[test]
+    fn timeline_is_scoped_to_the_calling_uid() {
+        let text = [row(1000, "gdm-password"), row(1001, "login")].join("\n");
+        let mine = timeline_rows_for_caller(&text, 1000);
+        assert_eq!(mine.len(), 1, "caller 1000 must see exactly their own row");
+        assert_eq!(mine[0]["uid"], 1000);
+        assert!(
+            !mine
+                .iter()
+                .any(|v| v.get("uid").and_then(|u| u.as_u64()) == Some(1001)),
+            "uid 1001's rows must never reach uid 1000"
+        );
+    }
+
+    /// Rows without a uid, and corrupt lines, are dropped, not leaked.
+    #[test]
+    fn timeline_drops_uidless_and_corrupt_rows() {
+        let text = [
+            row(1000, "gdm-password"),
+            r#"{"ts":1,"service":"login","result":"success"}"#.to_string(),
+            "not json at all".to_string(),
+        ]
+        .join("\n");
+        let mine = timeline_rows_for_caller(&text, 1000);
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["uid"], 1000);
     }
 }
