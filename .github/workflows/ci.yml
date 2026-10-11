@@ -110,6 +110,22 @@ jobs:
       - name: Lock screen must stay listen-only (no daemon method calls)
         run: sh shell-ext/check-listen-only.sh
 
+  # A published repository with no way to report a vulnerability
+  # privately is a finding, not an oversight (Phase 1, 1D-3). This
+  # fails the build while either placeholder is still present.
+  security-contact:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: SECURITY.md must name a real contact
+        run: |
+          if grep -n "Add a real contact\|<YOUR_CONTACT_EMAIL>" SECURITY.md; then
+            echo "FAIL: SECURITY.md still has a placeholder contact."
+            echo "      Set a reachable address before publishing."
+            exit 1
+          fi
+          echo "security contact present"
+
   # The packaging must stay buildable for BOTH architectures. An arm64
   # .deb is the only way most modern laptops get this at all, and it is
   # also the one that used to be impossible: mediapipe has no arm64

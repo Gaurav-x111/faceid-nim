@@ -2,8 +2,16 @@
 
 ## Reporting
 
-Report privately, not as a public issue. Add a real contact address here
-before publishing the repository.
+Report privately, not as a public issue.
+
+- Security contact: gauravshah0777@gmail.com
+- GitHub Private Vulnerability Reporting is the preferred channel once
+  enabled on the repository (it keeps the report, the fix, and the
+  disclosure timeline in one place).
+- Expected response: acknowledged within 7 days, best effort; this is
+  a solo-maintained pre-alpha project, so there is no on-call rotation
+  behind this address. If you have had no reply after 14 days, a polite
+  re-send is welcome.
 
 ## In scope
 
