@@ -1207,7 +1207,7 @@ class Window(Adw.ApplicationWindow):
                     parts.append("(built-in)")
                 names.append(" ".join(parts))
             self.cb_opening.set_model(Gtk.StringList.new(names))
-            active = cfg.get("active") or "glance"
+            active = cfg.get("active") or "iphone"
             if active in ids:
                 self.cb_opening.set_selected(ids.index(active))
         finally:
@@ -1223,7 +1223,7 @@ class Window(Adw.ApplicationWindow):
         self.preview_area.queue_draw()
 
         self._clear(self.opening_group, self._opening_rows)
-        active_id = cfg.get("active") or "glance"
+        active_id = cfg.get("active") or "iphone"
         for vid in ids:
             if vid in openings.BUILTIN:
                 continue
@@ -1302,9 +1302,9 @@ class Window(Adw.ApplicationWindow):
     def _draw_opening_preview_at(self, cr, w, h, ms=None) -> None:
         """Static frame (ms=None shows the settled end-state) or one
         animated frame ms after the splash start. Mirrors the lock
-        screen: glance = video halo hint (the mp4 plays in the inline
+        screen: iphone = video halo hint (the mp4 plays in the inline
         preview), logo = fade, glow = halo, none = empty pill."""
-        active = self._openings.get("active") or "glance"
+        active = self._openings.get("active") or "iphone"
         s = openings.spec(self._openings, active) or {}
         bg = _rgba_tuple(s.get("bg") or "rgba(14, 18, 26, 0.82)")
         accent = _rgba_tuple(s.get("accent") or "#a5d8ff")
@@ -1328,7 +1328,7 @@ class Window(Adw.ApplicationWindow):
             return
         if ms is None:
             alpha, pop = 1.0, 1.0
-        elif active == "glance":
+        elif active == "iphone":
             enter = min(max(ms / 420.0, 0.0), 1.0)
             e = 1 - pow(1 - enter, 3)
             # outBack spring to match opening.js tick().
@@ -1355,7 +1355,7 @@ class Window(Adw.ApplicationWindow):
             cr.arc(0.36, 0.5, 0.22 * pop, 0, 2 * math.pi)
             cr.set_line_width(0.03)
             cr.stroke()
-        elif active == "glance":
+        elif active == "iphone":
             # Halo + centre dot: the spring-pill look.
             cr.arc(0.36, 0.5, 0.22 * pop, 0, 2 * math.pi)
             cr.set_line_width(0.03)
@@ -1395,7 +1395,7 @@ class Window(Adw.ApplicationWindow):
         screen flips through as frames). Everything else previews with
         the same timing as the lock screen, looping until closed, so
         the choice can be judged before the next lock."""
-        active = self._openings.get("active") or "glance"
+        active = self._openings.get("active") or "iphone"
         s = openings.spec(self._openings, active) or {}
         if not s:
             self.toast("No animation selected")
@@ -1405,9 +1405,9 @@ class Window(Adw.ApplicationWindow):
             return
 
         mp4 = ""
-        if active == "glance":
+        if active == "iphone":
             mp4 = openings.glance_asset(
-                openings.GLANCE_CLIPS.get("glance", ""))
+                openings.GLANCE_CLIPS.get("iphone", ""))
         dlg = Adw.AlertDialog(
             heading=s.get("name") or "Animation",
             body=("The real unlock video — same clip the lock screen "
@@ -1434,7 +1434,7 @@ class Window(Adw.ApplicationWindow):
 
             def draw(area, cr, w, h, _data):
                 now_ms = (GLib.get_monotonic_time() - start) / 1000
-                period = 1600 if active == "glance" else max(
+                period = 1600 if active == "iphone" else max(
                     int(s.get("fade_ms") or 420) + 700, 900)
                 self._draw_opening_preview_at(cr, w, h, now_ms % period)
             preview.set_draw_func(draw, None)

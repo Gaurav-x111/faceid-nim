@@ -53,6 +53,6 @@ def test_js_plays_frames():
 
 
 def test_app_finds_clip_for_preview():
-    found = openings.glance_asset(openings.GLANCE_CLIPS["glance"])
+    found = openings.glance_asset(openings.GLANCE_CLIPS["iphone"])
     assert found, "app cannot locate unlockanimation.mp4 for preview"
     assert pathlib.Path(found).is_file()

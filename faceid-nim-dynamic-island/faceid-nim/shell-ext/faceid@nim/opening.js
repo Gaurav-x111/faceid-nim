@@ -13,7 +13,7 @@
  * optional raster/SVG logo.  A downloaded "animation" can repaint this
  * one capsule and nothing else -- it can never execute in the shell.
  *
- * Built-in variants are 'glance' (the default: the real unlock-video
+ * Built-in variants are 'iphone' (the default: the real unlock-video
  * from linux-anim, shipped as a PNG frame sequence next to this file
  * because Clutter/St in the lock screen cannot play mp4; falls back
  * to a spring pop + breathing pulse when the frames are missing),
@@ -94,8 +94,8 @@ const EASINGS = { outCubic: easeOutCubic, outBack: easeOutBack,
                   outExpo: easeOutExpo };
 
 const BUILTIN = {
-    glance: {
-        kind: 'builtin', name: 'Glance Video Pill',
+    iphone: {
+        kind: 'builtin', name: 'iPhone Video Pill',
         description: 'The real unlock video, playing on the lock screen.',
         logo: BUILTIN_LOGO_URL, text: 'Looking for your face…',
         bg: '', accent: '#9ad0ff', ease: 'outBack', fade_ms: 900,
@@ -124,7 +124,7 @@ const BUILTIN = {
 };
 
 function _readConfig() {
-    const fallback = { active: 'glance', variants: {}, scan_face: 'apple' };
+    const fallback = { active: 'iphone', variants: {}, scan_face: 'apple' };
     try {
         const file = Gio.File.new_for_path(CONFIG_PATH);
         if (!file.query_exists(null))
@@ -137,7 +137,7 @@ function _readConfig() {
             return fallback;
         const face = String(data.scan_face || 'apple');
         return {
-            active: String(data.active || 'glance'),
+            active: String(data.active || 'iphone'),
             variants: data.variants && typeof data.variants === 'object'
                 ? data.variants : {},
             scan_face: (face === 'classic' || face === 'arena') ? face : 'apple',
@@ -319,10 +319,14 @@ export class OpeningScene {
     // no extension reload.
     load() {
         const cfg = _readConfig();
+        // 'glance' was renamed to 'iphone'; old configs migrate here
+        // so a stored choice keeps working instead of falling back.
+        if (cfg.active === 'glance')
+            cfg.active = 'iphone';
         // Parens are load-bearing: without them this still parses as
         // (a || b) ? c : d, but the next reader will "fix" it into a bug.
         const id = (cfg.variants[cfg.active] || BUILTIN[cfg.active])
-            ? cfg.active : 'glance';
+            ? cfg.active : 'iphone';
         this._spec = _specFor(cfg, id);
         this._fadeMs = Math.max(1, this._spec.fade_ms);
         this._id = id;
@@ -331,7 +335,7 @@ export class OpeningScene {
     }
 
     id() {
-        return this._id || 'glance';
+        return this._id || 'iphone';
     }
 
     // 'apple' (default iPhone-like) | 'arena' (premium) | 'classic'.

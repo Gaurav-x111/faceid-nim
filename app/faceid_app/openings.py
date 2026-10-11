@@ -65,7 +65,7 @@ _GLANCE_ASSET_DIRS = (
 )
 
 GLANCE_CLIPS = {
-    "glance": "unlockanimation.mp4",
+    "iphone": "unlockanimation.mp4",
     "success": "unlockanimation.mp4",
     "failure": "unsuccessfulunlockanimation.mp4",
     "idle": "unlockstatic.png",
@@ -93,9 +93,9 @@ SCAN_FACES = ["apple", "arena", "classic"]
 DEFAULT_SCAN_FACE = "apple"
 
 BUILTIN = {
-    "glance": {
+    "iphone": {
         "kind": "builtin",
-        "name": "Glance Video Pill",
+        "name": "iPhone Video Pill",
         "description": "The real unlock video, playing on the lock screen.",
     },
     "logo": {
@@ -161,7 +161,7 @@ def _clean_spec(entry: dict) -> dict:
 # -- config -------------------------------------------------------------
 
 def default_config() -> dict:
-    return {"active": "glance", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
+    return {"active": "iphone", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
 
 
 def load() -> dict:
@@ -178,8 +178,10 @@ def load() -> dict:
             k: _clean_spec(v) for k, v in variants.items()
             if isinstance(v, dict)
         }
-        active = str(data.get("active", "glance"))
-        cfg["active"] = active if active in all_ids(cfg) else "glance"
+        active = str(data.get("active", "iphone"))
+        if active == "glance":
+            active = "iphone"  # renamed; old configs migrate
+        cfg["active"] = active if active in all_ids(cfg) else "iphone"
         face = str(data.get("scan_face", DEFAULT_SCAN_FACE))
         cfg["scan_face"] = face if face in SCAN_FACES else DEFAULT_SCAN_FACE
     except (OSError, ValueError):
@@ -237,7 +239,7 @@ def remove_variant(cfg: dict, variant_id: str) -> bool:
         return False
     del cfg["variants"][variant_id]
     if cfg.get("active") == variant_id:
-        cfg["active"] = "glance"
+        cfg["active"] = "iphone"
     save(cfg)
     shutil.rmtree(variant_dir(variant_id), ignore_errors=True)
     return True
