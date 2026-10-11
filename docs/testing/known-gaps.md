@@ -56,7 +56,8 @@ ledger is `docs/testing/master-audit-report.md`.
 
 | ID | Item | Reason | Closes when |
 |---|---|---|---|
-| M-1 | installed 1.1.1-1 predates all Phase 2 + master fixes | reinstall needs sudo; auditor has none | `sudo apt install ./dist/faceid-nim_1.1.1-1_amd64.deb` (rebuilt 2026-10-11, artifact verified to contain the fixes), then re-run `scripts/live-proofs.sh` + live proofs 1–4 |
+| M-1 | installed 1.1.1-1 predates all Phase 2 + master fixes | **CLOSED 2026-10-11 ~21:02**: user ran `sudo apt install ./dist/faceid-nim_1.1.1-1_amd64.deb`; postinst clean (models/landmarks/antispoof ready); installed polkit now shows 6/6 actions incl. `org.faceidnim.test`; installed bus conf has 20 `send_member` + 6 enumerated Enrollment1 members, no blanket; both units restarted with new PIDs; `faceid-nim status` healthy | re-verify after every future rebuild (same version number is reused — see M-1b) |
+| M-1b | installed-vs-source drift returns if source moves again | same version number reused across rebuilds | after any source change: rebuild, reinstall, re-verify (`live-proofs.sh` polkit-action count + `status`) |
 | M-2 | nested-shell pill runtime test | nested `gnome-shell --nested --wayland` fails to take a display in the live session (`WL: unable to lock lockfile /run/user/1000/wayland-0.lock`); needs a disposable graphical session or VT | run item 4 of `docs/live-proof-checklist.md` there; any Cairo traceback pasted verbatim |
 | M-3 | purge test | must not run on the daily driver; needs a throwaway VM | item 5 of the checklist in a VM |
 | M-4 | overnight soak | needs hours + sudo for restart loops | 200-attempt soak per checklist item 6, or ≥8 h idle RSS |
