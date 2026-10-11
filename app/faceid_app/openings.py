@@ -389,7 +389,9 @@ def install_package(package_path: str) -> str:
 
     try:
         meta = json.loads(z.read("opening.json"))
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, RuntimeError):
+        # RuntimeError: encrypted or otherwise unreadable entry --
+        # still just "not installable", never a traceback.
         z.close()
         raise ValueError("Package has no readable opening.json") from None
     if not isinstance(meta, dict):
@@ -444,7 +446,16 @@ def install_package(package_path: str) -> str:
 
 
 def download(url: str) -> bytes:
-    """Fetch a URL with a size cap (never block the caller's intent)."""
+    """Fetch a URL with a size cap (never block the caller's intent).
+
+    Only http/https: the URL box takes arbitrary user input, and
+    urllib would otherwise happily fetch file://, ftp:// or data://
+    URLs too. Anything else is refused before any network or disk
+    access happens.
+    """
+    scheme = urllib.parse.urlsplit(str(url).strip()).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("Only http(s) animation URLs can be installed")
     req = urllib.request.Request(url, headers={"User-Agent": "faceid-nim/1"})
     with urllib.request.urlopen(req, timeout=25) as resp:
         data = resp.read(MAX_UNPACK_BYTES + 1)
