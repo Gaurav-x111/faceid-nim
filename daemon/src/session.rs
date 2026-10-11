@@ -227,6 +227,28 @@ impl Engine {
                 return AuthOutcome::deny(Verdict::LockedOut.user_message());
             }
         }
+        // Nothing enrolled (or everything disabled): refuse BEFORE the
+        // camera ever opens. A scan with no templates to match can only
+        // waste power and confuse ("why is it scanning when I deleted
+        // my face?"). Falls through to the password like every other
+        // unavailable path, and never touches the failure counter.
+        // (Stale-model identities still scan: the running model_id is
+        // only known after the worker answers, and that path already
+        // refuses post-scan further below.)
+        if !self.store.any_enabled(uid) {
+            self.emit(ScanState::Rejected, 0.0, "").await;
+            log(
+                "refused",
+                "no_identities",
+                &no_cues,
+                cfg.strictness.as_str(),
+                None,
+                0,
+                "unknown",
+                None,
+            );
+            return AuthOutcome::unavailable(Verdict::NoIdentities.user_message());
+        }
         let _scan_permit = match self.scan_slots.acquire().await {
             Ok(permit) => permit,
             Err(_) => return AuthOutcome::unavailable("Face scan is unavailable"),
@@ -638,6 +660,48 @@ mod tests {
             engine.policy.lock().await.failures(TEST_UID),
             0,
             "a dead worker is not a failed attempt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No enrollments: the daemon must refuse WITHOUT opening the
+    /// camera ("deleted my face and it still scans"). The worker
+    /// socket here is bogus on purpose: any scan attempt would fail
+    /// as a camera/worker error, so a clean no_identities refusal
+    /// proves no scan was attempted. The failure counter stays at 0.
+    #[tokio::test]
+    async fn no_enrollments_refuses_without_scanning() {
+        let dir = test_dir("empty-store");
+        let sock = dir.join("no-worker.sock");
+        let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
+        let cfg = Config {
+            enabled: true,
+            ..Config::default()
+        };
+        let audit = Arc::new(Audit::new(&dir.join("audit.log")));
+        let (state_tx, mut state_rx) = mpsc::channel(64);
+        tokio::spawn(async move { while state_rx.recv().await.is_some() {} });
+        let engine = Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(cfg)),
+            store,
+            worker: Arc::new(Worker::new(sock)),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit,
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        assert!(!out.success);
+        assert!(out.unavailable, "must fall through to password");
+        assert_eq!(out.message, Verdict::NoIdentities.user_message());
+        assert_eq!(engine.policy.lock().await.failures(TEST_UID), 0);
+        let log = std::fs::read_to_string(dir.join("audit.log")).expect("audit written");
+        assert!(log.contains("no_identities"), "audit must show {log}");
+        assert!(
+            !log.to_lowercase().contains("camera") && !log.to_lowercase().contains("worker"),
+            "no camera/worker error may appear: {log}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

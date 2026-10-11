@@ -364,6 +364,25 @@ impl Daemon1 {
             .map_err(|_| zbus::fdo::Error::Failed("scan slots unavailable".into()))?;
         let stx = self.engine.state_tx.clone();
 
+        // Nothing enrolled (or everything disabled): answer "not
+        // recognised" without opening the camera -- there is nothing
+        // a scan could match. Detail goes to the audit log as usual.
+        if !self.store.any_enabled(uid) {
+            let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
+            log_test(
+                "test",
+                "no_identities_enrolled",
+                &no_cues,
+                cfg.strictness.as_str(),
+                None,
+                0,
+                "unknown",
+                None,
+            );
+            let (ok, coarse) = coarse_test_outcome(false, true, true);
+            return Ok((ok, coarse.to_string()));
+        }
+
         let _ = stx.send((ScanState::Waking, 0.0, String::new())).await;
         let _ = stx.send((ScanState::Searching, 0.05, String::new())).await;
 

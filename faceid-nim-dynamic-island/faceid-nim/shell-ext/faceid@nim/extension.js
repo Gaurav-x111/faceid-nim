@@ -61,6 +61,7 @@ export default class FaceIdExtension extends Extension {
         // the shield's curtain (the shield raises its lightbox above
         // everything when locking, and locked-changed fires afterwards).
         this._pill.reset();
+        this._lastTerminal = null;
         Main.uiGroup?.set_child_above_sibling?.(this._pill, null);
     }
 
@@ -68,6 +69,25 @@ export default class FaceIdExtension extends Extension {
         try { log(`faceid@nim: ScanState ${state} ${progress} ${(reason || '').slice(0, 24)} visible=${this._pill?.visible} state=${this._pill?._state}`); } catch (e) {}
         if (!this._pill)
             return;
+
+        // Terminal-state exclusivity: two scans can overlap on the bus
+        // (a slow older scan finishing after a newer one), and without
+        // this a stale 'rejected' overwrites a fresh 'matched' display
+        // or vice versa -- "recognized and denied both together". A
+        // full scan takes seconds, so an opposite terminal within 3 s
+        // of the last one is near-certainly the stale loser, not a new
+        // attempt; drop it. A fresh waking/searching clears the guard.
+        // Display-only: PAM decisions never flow through here.
+        const now = Date.now();
+        const TERMINAL = ['matched', 'rejected', 'timeout', 'camera_error'];
+        if (TERMINAL.includes(state)) {
+            if (this._lastTerminal && this._lastTerminal.state !== state &&
+                now - this._lastTerminal.at < 3000)
+                return;
+            this._lastTerminal = { state, at: now };
+        } else if (state === 'waking' || state === 'searching') {
+            this._lastTerminal = null;
+        }
 
         switch (state) {
         case 'waking':

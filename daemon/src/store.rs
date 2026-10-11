@@ -377,6 +377,24 @@ impl Store {
             .collect()
     }
 
+    /// True when `uid` has at least one enabled identity (any model).
+    /// Lets the daemon refuse an attempt *before* opening the camera:
+    /// with nothing enrolled there is nothing a scan could match, so
+    /// powering the sensor would only waste power and confuse the user
+    /// ("why is it scanning when I deleted my face?"). Unreadable
+    /// files are skipped, never counted.
+    pub fn any_enabled(&self, uid: u32) -> bool {
+        self.list(uid)
+            .into_iter()
+            .any(|n| match self.load(uid, &n) {
+                Ok(i) => i.enabled,
+                Err(e) => {
+                    tracing::warn!("skipping identity {n}: {e}");
+                    false
+                }
+            })
+    }
+
     pub fn delete(&self, uid: u32, name: &str) -> Result<()> {
         let p = self.path(uid, name)?;
         if p.exists() {
@@ -489,5 +507,19 @@ mod tests {
         s.save(1000, &ident()).unwrap();
         assert_eq!(s.load_enabled(1000, "arcface_v2").len(), 0);
         assert_eq!(s.load_enabled(1000, "sface_v1").len(), 1);
+    }
+
+    #[test]
+    fn any_enabled_ignores_disabled_and_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        assert!(!s.any_enabled(1000), "nothing enrolled");
+        let mut off = ident();
+        off.enabled = false;
+        s.save(1000, &off).unwrap();
+        assert!(!s.any_enabled(1000), "disabled identity counts as none");
+        s.save(1000, &ident()).unwrap();
+        assert!(s.any_enabled(1000), "enabled identity found");
+        assert!(!s.any_enabled(1001), "other uid unaffected");
     }
 }
