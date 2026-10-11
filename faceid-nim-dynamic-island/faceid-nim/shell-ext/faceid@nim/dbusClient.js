@@ -6,8 +6,12 @@
  * a camera frame, an embedding or a similarity score -- only a state
  * name, a progress number and a short reason string.
  *
- * `TestScan` and `Retry` are described here so the proxy knows the
- * interface, but only the signal is relied on for the animation. */
+ * LISTEN-ONLY (1B-2): this proxy declares the ScanState signal and
+ * nothing else. The extension must call NO daemon methods: TestScan
+ * opens the camera, so a hover-to-retry from the lock screen was a
+ * silent camera activation by anything that could move the mouse.
+ * shell-ext/check-listen-only.sh enforces this in CI -- do not add a
+ * <method> entry or a proxy invocation here. */
 
 import Gio from 'gi://Gio';
 
@@ -19,12 +23,6 @@ const IFACE = `
       <arg type="d" name="progress"/>
       <arg type="s" name="reason"/>
     </signal>
-    <method name="Diagnostics"><arg type="s" direction="out"/></method>
-    <method name="TestScan">
-      <arg type="b" direction="out"/>
-      <arg type="s" direction="out"/>
-    </method>
-    <method name="PreviewAnimation"><arg type="s" direction="in"/></method>
   </interface>
 </node>`;
 
@@ -74,43 +72,8 @@ export class DaemonClient {
         this._onState?.('idle', 0, '');
     }
 
-    // Hover-to-retry: the daemon has no Retry method, so a hover
-    // simply re-exercises the same camera path via TestScan.
-    // Never throws out of the hover handler.
-    retry() {
-        return this.testScan().then(() => true, () => false);
-    }
-
-    testScan() {
-        if (!this._proxy)
-            return Promise.resolve([false, 'daemon unreachable']);
-        try {
-            return this._proxy.TestScan().catch(e => {
-                logError(e, 'faceid@nim: TestScan');
-                return [false, String(e)];
-            });
-        } catch (e) {
-            logError(e, 'faceid@nim: TestScan');
-            return Promise.resolve([false, String(e)]);
-        }
-    }
-
-    // Developer-only preview: asks the daemon to play the full success
-    // sequence (scan -> ring -> check -> Verified -> Welcome -> name)
-    // with no camera and no auth. Signals-only, so it can never unlock
-    // anything; used to tune the animation without standing at the screen.
-    preview(userId = '') {
-        if (!this._proxy)
-            return Promise.resolve(false);
-        try {
-            return this._proxy.PreviewAnimation(
-                String(userId).slice(0, 24)).then(() => true, () => false);
-        } catch (e) {
-            logError(e, 'faceid@nim: PreviewAnimation');
-            return Promise.resolve(false);
-        }
-    }
-
+    // Listen-only: no method calls. The retry path on the lock screen
+    // is the password prompt, not a camera rescan (see extension.js).
     _disconnectProxy() {
         if (this._proxy && this._signalId) {
             try { this._proxy.disconnectSignal(this._signalId); } catch { }
