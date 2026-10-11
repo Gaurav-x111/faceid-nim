@@ -1,8 +1,10 @@
-# Known gaps — consolidated BLOCKED / UNTESTED (Rounds 1 + 2)
+# Known gaps — consolidated BLOCKED / UNTESTED (Rounds 1 + 2 + master audit)
 
 Running list. An entry leaves only with a measured result, never with
 an assumption. "Round 1" items are as recorded in the Round 2 brief
-(the Round 1 raw report is not in the repo).
+(the Round 1 raw report is not in the repo). "Master" items are from
+the 2026-10-11 master audit (branch `phase2-remediation`); the full
+ledger is `docs/testing/master-audit-report.md`.
 
 ## Blocked — needs root (no root in audit sessions)
 
@@ -47,8 +49,35 @@ an assumption. "Round 1" items are as recorded in the Round 2 brief
 | ID | Item | How |
 |---|---|---|
 | X-1 | MiniFASNet licence/pinning | user pinned `d7b3…`, fetched, restarted worker 2026-10-07 16:43 (journal-proven); cue live |
-| X-2 | installed-vs-tree drift for the daemon/worker | `strings` + live `GetSettings` confirm 1.1.1-1 ≈ current source for those binaries (CLI script still stale — see R2-12) |
+| X-2 | installed-vs-tree drift for the daemon/worker | `strings` + live `GetSettings` confirm 1.1.1-1 ≈ current source for those binaries (CLI script still stale — see R2-12). **STALE AGAIN after Phase 2: the installed 1.1.1-1 predates every Phase 2 + master-audit fix (no `org.faceidnim.test` action live, old TestScan strings, old extension). Reinstall the rebuilt .deb, then re-verify — see M-1.** |
 | X-3 | user's personal non-recognition cause | narrowed to a liveness (antispoof) veto by two live `gdm-password` denials with `valid_frames=1`; user to confirm with `sudo faceid-nim audit 20` |
+
+## Master audit (2026-10-11) — new blocked / noted items
+
+| ID | Item | Reason | Closes when |
+|---|---|---|---|
+| M-1 | installed 1.1.1-1 predates all Phase 2 + master fixes | reinstall needs sudo; auditor has none | `sudo apt install ./dist/faceid-nim_1.1.1-1_amd64.deb` (rebuilt 2026-10-11, artifact verified to contain the fixes), then re-run `scripts/live-proofs.sh` + live proofs 1–4 |
+| M-2 | nested-shell pill runtime test | nested `gnome-shell --nested --wayland` fails to take a display in the live session (`WL: unable to lock lockfile /run/user/1000/wayland-0.lock`); needs a disposable graphical session or VT | run item 4 of `docs/live-proof-checklist.md` there; any Cairo traceback pasted verbatim |
+| M-3 | purge test | must not run on the daily driver; needs a throwaway VM | item 5 of the checklist in a VM |
+| M-4 | overnight soak | needs hours + sudo for restart loops | 200-attempt soak per checklist item 6, or ≥8 h idle RSS |
+
+## Master audit — noted limitations (no test blocked, documented here)
+
+- Lockout counters are in-memory: a daemon restart clears them. Only
+  root can restart the daemon, and root is outside the threat model,
+  so this is accepted — but a crash loop would also clear them.
+- `common-auth` carries `timeout=4500` while the shipped profile says
+  `timeout=10000`: the line was generated from an older profile and
+  `postinst` deliberately skips regeneration on upgrade (preserves
+  admin tuning). Effect is fail-safe (module gives up first, password
+  follows); the daemon-side scan is then orphaned for a few seconds.
+- Legacy `Daemon1.Enroll` (blocking multi-pose) is still exposed but
+  unused by the app (onboarding uses `Enrollment1`); a 12-pose call can
+  outlast the app's 60 s D-Bus timeout while the server keeps working.
+  Kept for compatibility, not removed.
+- `PreviewAnimation` is now polkit-gated (`org.faceidnim.test`) so a
+  remote/inactive session cannot paint a fake success on a lock screen;
+  local dev use is unchanged (promptless for the active session).
 
 ## Still open (design work, not test-blocked)
 
