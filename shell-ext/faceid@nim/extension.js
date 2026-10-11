@@ -27,8 +27,9 @@ export default class FaceIdExtension extends Extension {
         this._lockId = Main.screenShield?.connect?.('locked-changed',
             (_, locked) => this._onLocked(locked)) ?? 0;
 
-        // Hover-to-retry on a rejected scan hands back to the daemon.
-        this._pill.setRetryHandler(() => this._client?.retry());
+        // Listen-only: the client subscribes to ScanState and calls no
+        // daemon methods. There is deliberately no retry path here --
+        // on the lock screen the retry path is the password prompt.
         this._client.connect((state, progress, reason) =>
             this._onState(state, progress, reason));
 

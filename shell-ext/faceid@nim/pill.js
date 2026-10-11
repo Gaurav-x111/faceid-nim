@@ -126,7 +126,7 @@ const FADE_MS = 650;          // HUD settles: dims, shrinks, fades (was 420)
 const SWEEP_MS = 2200;        // one full ray sweep while scanning (demo avg ~1.35-2.2s)
 
 const FAIL_CARD_AT_MS = 1400; // failure card enters after the shake (was 900)
-const REJECT_MS = 2600;       // shake + "Hover to try again" hold (was 1500)
+const REJECT_MS = 2600;       // shake + "Use your password" hold (was 1500)
 
 // Dynamic-Island notch geometry: the pill is a black capsule pinned to
 // the monitor top edge, horizontally centred -- never the screen centre.
@@ -268,7 +268,6 @@ class FaceIdPill extends St.Widget {
         this._lastScanT = 0;
         this._rejectSweep = 0;
         this._ticker = 0;
-        this._retryHandler = null;
         this._loginContext = false;
 
         this.connect('enter-event', () => this._onEnter());
@@ -450,7 +449,7 @@ class FaceIdPill extends St.Widget {
         this._pendingVerify = false;
         this._show();
         this._setClasses(false);
-        this._setLabel('Hover to try again');
+        this._setLabel('Use your password');
         this._enter('rejected');
     }
 
@@ -507,10 +506,6 @@ class FaceIdPill extends St.Widget {
         this._stopClock();
     }
 
-    setRetryHandler(fn) {
-        this._retryHandler = fn;
-    }
-
     destroy() {
         if (this._a11yChangedId) {
             this._a11y.disconnect(this._a11yChangedId);
@@ -518,7 +513,6 @@ class FaceIdPill extends St.Widget {
         }
         this._a11y = null;
         this._stopClock();
-        this._retryHandler = null;
         super.destroy();
     }
 
@@ -606,12 +600,10 @@ class FaceIdPill extends St.Widget {
     }
 
     _onEnter() {
-        if (this._state === 'rejected') {
-            // Hover-to-retry: hand back to the daemon and rescan.
-            if (this._retryHandler)
-                this._retryHandler();
-            this.startScanning(this._reason || null);
-        }
+        // Listen-only: hovering a rejected scan must NOT rescan -- the
+        // old hover-to-retry fired a camera TestScan from the lock
+        // screen with no consent. The retry path is the password
+        // prompt, so a hover is a no-op by design.
     }
 
     _onLeave() { }
