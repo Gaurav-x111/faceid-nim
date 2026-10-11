@@ -167,7 +167,9 @@ scan never flashes past unseen. On success the ring resolves green,
 a ✓ draws with a particle burst, and a small card drops **below**
 the island — `✓ Verified` / **Welcome** / your name at login,
 `✓ Verified` alone for sudo/PAM. On failure: `× Not recognized` /
-"Use password to continue" (hover the island to retry).
+"Use your password" — the password prompt is the retry path; hovering
+the island does nothing by design (a hover rescan would let anything
+that moves the mouse fire the camera from the lock screen).
 
 Everything animates off a single 16 ms clock keyed to actual elapsed
 time (scan ≈ 1.5 s minimum, full sequence ≈ 3.4 s), so a fast or slow
@@ -195,7 +197,7 @@ Customization lives in the app → **Opening** page, stored per user in
 
 ```json
 {
-  "active": "logo",        // which opening animation plays at scan start
+  "active": "iphone",      // which opening animation plays at scan start
   "variants": {},          // user specs indexed by id
   "scan_face": "apple"     // scanner style: apple | arena | classic
 }
@@ -205,8 +207,8 @@ Customization lives in the app → **Opening** page, stored per user in
 (default)** = thin track + progress arc + smiling face,
 **Orbit** = halo/crest/comet scanner, **Classic** = original ring.
 
-**The opening** (`Opening → Active animation`): built-ins `logo`
-(default), `glow`, `none` — or **Create an opening animation**: pick
+**The opening** (`Opening → Active animation`): built-ins `iphone`
+(default, the unlock video), `logo`, `glow`, `none` — or **Create an opening animation**: pick
 a headline, colours, easing, duration, optional logo → **Publish to
 GitHub** exports a `.faceopen` package with ready `gh` commands.
 Others install via **Install from file** / **Install from URL**, or
@@ -398,6 +400,35 @@ numbers, never "99% accurate".
 | Face not recognized repeatedly | Improve light (face the screen, even light), re-enroll, or lower strictness; check `tau` via [eval](#measure-your-own-thresholds) |
 | Spoken greeting is silent | Install a speech engine (`sudo apt install speech-dispatcher` or `espeak-ng`); test from Settings → Voice greeting → Hear |
 | App opens to a blank window | Update to the latest build (fixed libadwaita 1.4 incompatibility) |
+
+## Behavior questions (quick answers)
+
+- **I deleted my face — why did the camera still turn on?** It
+  shouldn't anymore: with nothing enrolled the daemon refuses *before*
+  the sensor powers on and falls through to your password. If the
+  light still comes on, you're running an older installed build —
+  reinstall the current `.deb`.
+- **Only the animation I picked ever plays.** If success and failure
+  (or splash, scan and result) seem to overlap, that's two scans
+  finishing out of order, not two animations selected — a stale result
+  can no longer overwrite a fresh one. At the GDM login screen the
+  default iPhone animation always plays; your choice applies on your
+  own lock screen.
+- **Adding your own:** Opening page → Create (format above); swapping
+  the iPhone video itself takes the mp4 *plus* re-extracted
+  lock-screen frames — steps and sizes in `docs/animations.md`.
+- **How many faces?** No fixed identity cap (15 templates each). With
+  several enrolled people in frame at once, any one matching unlocks —
+  and every identity under your account opens *your* account, so only
+  enrol people you trust with it.
+- **Photo or video held up to the camera?** No. Print dies on
+  planarity/parallax + blink; screens add moiré + glare; video adds
+  challenge-response at heavy; IR checks live skin; the ML anti-spoof
+  model adds a learned verdict when present — and any single cue
+  vetoes the unlock whatever the match. Honestly: resistance is
+  unmeasured with real attack samples here, so run
+  `eval/apcer_bpcer.py` with your own clips (it refuses small-n
+  claims) before quoting numbers. Full detail: `docs/animations.md`.
 
 ## Recovery
 
