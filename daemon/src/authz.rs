@@ -13,6 +13,11 @@ pub const ACTION_ENABLE: &str = "org.faceidnim.enable";
 /// (Round-2 audit: StartPreview handed camera JPEGs to any local
 /// caller with only a uid check.)
 pub const ACTION_PREVIEW: &str = "org.faceidnim.preview";
+/// A diagnostic scan still opens the camera, so it needs a polkit
+/// decision -- but `allow_active = yes` (no password prompt) so the
+/// Test button stays smooth. Remote and inactive sessions are denied:
+/// the camera must not open for someone not at this machine.
+pub const ACTION_TEST: &str = "org.faceidnim.test";
 
 type PolkitSubject = (String, HashMap<String, OwnedValue>);
 type AuthzResult = zbus::Result<(bool, bool, HashMap<String, String>)>;
@@ -86,6 +91,7 @@ mod tests {
         assert_eq!(ACTION_DELETE, "org.faceidnim.delete");
         assert_eq!(ACTION_ENABLE, "org.faceidnim.enable");
         assert_eq!(ACTION_PREVIEW, "org.faceidnim.preview");
+        assert_eq!(ACTION_TEST, "org.faceidnim.test");
         let policy = std::fs::read_to_string("../packaging/polkit/org.faceidnim.policy")
             .expect("installed polkit policy");
         for action in [
@@ -94,6 +100,7 @@ mod tests {
             ACTION_DELETE,
             ACTION_ENABLE,
             ACTION_PREVIEW,
+            ACTION_TEST,
         ] {
             assert!(policy.contains(&format!("action id=\"{action}\"")));
         }
@@ -110,5 +117,31 @@ mod tests {
         ] {
             assert!(bus.contains(&format!("send_member=\"{member}\"")));
         }
+    }
+
+    /// 1B-2 regression: the TestScan action must stay promptless for
+    /// the local active session but closed for remote/inactive ones.
+    /// `auth_self` here would password-prompt every Test-button click;
+    /// `yes` for inactive/any would open the camera for sessions not
+    /// at this machine.
+    #[test]
+    fn test_action_is_promptless_local_only() {
+        let policy = std::fs::read_to_string("../packaging/polkit/org.faceidnim.policy")
+            .expect("installed polkit policy");
+        let start = policy
+            .find("action id=\"org.faceidnim.test\"")
+            .expect("test action present");
+        let block = &policy[start..];
+        let end = block.find("</action>").expect("test action closed");
+        let block = &block[..end];
+        assert!(block.contains("<allow_any>no</allow_any>"), "remote: no");
+        assert!(
+            block.contains("<allow_inactive>no</allow_inactive>"),
+            "inactive: no"
+        );
+        assert!(
+            block.contains("<allow_active>yes</allow_active>"),
+            "active: yes"
+        );
     }
 }
