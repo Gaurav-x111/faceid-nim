@@ -493,6 +493,38 @@ mod tests {
         });
     }
 
+    /// Fake vision worker: answers every scan with a PERFECT face match
+    /// that carries a liveness veto. The daemon must still refuse: a
+    /// match must never override a spoof signal.
+    async fn spawn_vetoed_match_worker(sock: std::path::PathBuf) {
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind veto worker");
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (rd, mut wr) = stream.into_split();
+                    let mut lines = BufReader::new(rd).lines();
+                    let _ = lines.next_line().await;
+                    // [1,0,...]: cosine 1.0 against the enrolled
+                    // template, far above any tau -- accepted on
+                    // recognition, vetoed on liveness.
+                    let reply = serde_json::json!({
+                        "ev": "done",
+                        "embeddings": [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+                        "model_id": TEST_MODEL,
+                        "liveness": {"deny": ["moire"], "confirm": [],
+                                      "attention_ok": true},
+                        "spectrum": "",
+                    });
+                    let _ = wr.write_all(format!("{reply}\n").as_bytes()).await;
+                });
+            }
+        });
+    }
+
     fn test_engine(sock: std::path::PathBuf, dir: &std::path::Path) -> Arc<Engine> {
         let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
         // Enrolled template [1,0,...]: cosine 0.0 against the worker's
@@ -702,6 +734,76 @@ mod tests {
         assert!(
             !log.to_lowercase().contains("camera") && !log.to_lowercase().contains("worker"),
             "no camera/worker error may appear: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A perfect face match carrying a liveness veto must still be
+    /// refused -- and it counts as a failed attempt (the face was
+    /// judged, not unavailable). This is the core invariant of the
+    /// whole daemon; the test pins it against a worker that matches
+    /// with cosine 1.0 while reporting a moire spoof cue.
+    #[tokio::test]
+    async fn perfect_match_with_liveness_veto_is_denied() {
+        let dir = test_dir("vetoed-match");
+        let sock = dir.join("vision.sock");
+        spawn_vetoed_match_worker(sock.clone()).await;
+        let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
+        let mut t = vec![0.0f32; 8];
+        t[0] = 1.0;
+        store
+            .save(
+                TEST_UID,
+                &Identity {
+                    name: "test".into(),
+                    model_id: TEST_MODEL.into(),
+                    enabled: true,
+                    templates: vec![t],
+                    spectra: vec![crate::store::SPECTRUM_ANY],
+                },
+            )
+            .expect("save test identity");
+        let cfg = Config {
+            enabled: true,
+            strictness: Strictness::Light,
+            tau: 0.9,
+            // 1-of-1 voting: the single matching embedding IS accepted
+            // on recognition, so liveness is the ONLY thing standing
+            // between this scan and an unlock. If the veto ever stops
+            // working, this test authenticates -- and fails loudly.
+            vote_k: 1,
+            vote_n: 1,
+            max_failures: 5,
+            lockout_secs: 60,
+            ..Config::default()
+        };
+        let audit = Arc::new(Audit::new(&dir.join("audit.log")));
+        let (state_tx, mut state_rx) = mpsc::channel(64);
+        tokio::spawn(async move { while state_rx.recv().await.is_some() {} });
+        let engine = Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(cfg)),
+            store,
+            worker: Arc::new(Worker::new(sock)),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit,
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        assert!(!out.success, "a vetoed match must never authenticate");
+        assert!(!out.unavailable, "a judged face is a denial, not unavail");
+        assert_eq!(out.message, "Face not recognised");
+        assert_eq!(
+            engine.policy.lock().await.failures(TEST_UID),
+            1,
+            "a vetoed match records exactly one failed attempt"
+        );
+        let log = std::fs::read_to_string(dir.join("audit.log")).expect("audit written");
+        assert!(
+            log.contains("liveness_deny:moire"),
+            "audit must carry the veto detail: {log}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

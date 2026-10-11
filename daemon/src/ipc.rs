@@ -249,6 +249,58 @@ mod tests {
         writer.await.unwrap();
     }
 
+    fn test_engine_at(dir: &std::path::Path) -> Arc<Engine> {
+        let (state_tx, _state_rx) = mpsc::channel(4);
+        Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(Config::default())),
+            store: Arc::new(Store::open(&dir.join("store")).unwrap()),
+            worker: Arc::new(Worker::new(dir.join("no-worker.sock"))),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit: Arc::new(Audit::new(&dir.join("audit.log"))),
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    async fn read_reply_line(client: &mut UnixStream) -> String {
+        let (rd, _wr) = client.split();
+        let mut rd = tokio::io::BufReader::new(rd);
+        let mut line = String::new();
+        use tokio::io::AsyncBufReadExt as _;
+        rd.read_line(&mut line).await.expect("reply line");
+        line
+    }
+
+    /// Malformed input -- garbage JSON, wrong op, auth for nobody --
+    /// must answer "unavail" (fall through to password), never "ok",
+    /// and never reach the camera path.
+    #[tokio::test]
+    async fn malformed_requests_are_unavailable_never_ok() {
+        let dir = std::env::temp_dir().join(format!("faceid-badreq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for bad in [
+            "this is not json\n",
+            "{\"op\":\"explode\",\"user\":\"root\",\"service\":\"sudo\"}\n",
+            "{\"op\":\"auth\",\"user\":\"no-such-user-xyz\",\"service\":\"sudo\"}\n",
+            "{}\n",
+        ] {
+            let engine = test_engine_at(&dir);
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let server_task = tokio::spawn(async move { handle(server, engine, 1).await });
+            client.write_all(bad.as_bytes()).await.unwrap();
+            let reply = read_reply_line(&mut client).await;
+            assert!(
+                reply.contains("\"unavail\""),
+                "malformed request {bad:?} must be unavail, got {reply:?}"
+            );
+            assert!(!reply.contains("\"ok\""), "never ok: {reply:?}");
+            server_task.await.unwrap().expect("handle returns Ok");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Audit BLOCKER 2 verification: a client that connects and sends
     /// nothing must be reaped within IDLE_READ_TIMEOUT (permit freed,
     /// no hang), not held forever. The worker socket is bogus on

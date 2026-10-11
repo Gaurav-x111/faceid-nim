@@ -106,9 +106,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Parse-check the extension
-        run: for f in shell-ext/faceid@nim/*.js; do node --input-type=module --check < "$f"; done
+        run: for f in shell-ext/faceid@nim/*.js faceid-nim-dynamic-island/faceid-nim/shell-ext/faceid@nim/*.js; do node --input-type=module --check < "$f"; done
       - name: Lock screen must stay listen-only (no daemon method calls)
         run: sh shell-ext/check-listen-only.sh
+      - name: Terminal-state guard unit tests
+        run: node --test shell-ext/tests/test-scan-guard.mjs
 
   # A published repository with no way to report a vulnerability
   # privately is a finding, not an oversight (Phase 1, 1D-3). This

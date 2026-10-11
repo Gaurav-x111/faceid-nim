@@ -522,4 +522,22 @@ mod tests {
         assert!(s.any_enabled(1000), "enabled identity found");
         assert!(!s.any_enabled(1001), "other uid unaffected");
     }
+
+    #[test]
+    fn deleted_identity_stays_deleted() {
+        // Deletion must prevent future authentication through the
+        // deleted templates: load, load_enabled and any_enabled must
+        // all agree the identity is gone, with no file left behind.
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(d.path()).unwrap();
+        s.save(1000, &ident()).unwrap();
+        assert!(s.any_enabled(1000));
+        s.delete(1000, "default").unwrap();
+        assert!(s.load(1000, "default").is_err(), "deleted must not load");
+        assert!(s.load_enabled(1000, "sface_v1").is_empty());
+        assert!(!s.any_enabled(1000));
+        assert!(!d.path().join("users/1000/default.tpl").exists());
+        // Deleting twice is not an error (idempotent cleanup).
+        s.delete(1000, "default").unwrap();
+    }
 }

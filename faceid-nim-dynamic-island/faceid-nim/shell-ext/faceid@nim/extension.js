@@ -19,6 +19,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import { DaemonClient } from './dbusClient.js';
 import { FaceIdPill } from './pill.js';
+import { filterTerminal } from './scanGuard.js';
 
 export default class FaceIdExtension extends Extension {
     enable() {
@@ -70,24 +71,14 @@ export default class FaceIdExtension extends Extension {
         if (!this._pill)
             return;
 
-        // Terminal-state exclusivity: two scans can overlap on the bus
-        // (a slow older scan finishing after a newer one), and without
-        // this a stale 'rejected' overwrites a fresh 'matched' display
-        // or vice versa -- "recognized and denied both together". A
-        // full scan takes seconds, so an opposite terminal within 3 s
-        // of the last one is near-certainly the stale loser, not a new
-        // attempt; drop it. A fresh waking/searching clears the guard.
+        // Terminal-state exclusivity (master audit 5F): two scans can
+        // overlap on the bus and a stale terminal must not overwrite a
+        // fresh one. Tested in shell-ext/tests/test-scan-guard.mjs.
         // Display-only: PAM decisions never flow through here.
-        const now = Date.now();
-        const TERMINAL = ['matched', 'rejected', 'timeout', 'camera_error'];
-        if (TERMINAL.includes(state)) {
-            if (this._lastTerminal && this._lastTerminal.state !== state &&
-                now - this._lastTerminal.at < 3000)
-                return;
-            this._lastTerminal = { state, at: now };
-        } else if (state === 'waking' || state === 'searching') {
-            this._lastTerminal = null;
-        }
+        const f = filterTerminal(state, Date.now(), this._lastTerminal ?? null);
+        this._lastTerminal = f.last;
+        if (!f.show)
+            return;
 
         switch (state) {
         case 'waking':

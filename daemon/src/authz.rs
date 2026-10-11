@@ -179,4 +179,64 @@ mod tests {
             "active: yes"
         );
     }
+
+    /// Master-audit registration check: every D-Bus method implemented
+    /// on Enrollment1 in src/enroll.rs must be enumerated in the bus
+    /// policy tested above -- a method that exists in code but is
+    /// missing from the policy is either unreachable (dead) or
+    /// reachable without an explicit allow (policy hole). Helpers and
+    /// the EnrollProgress signal are not method calls and are excluded.
+    #[test]
+    fn enrollment_methods_match_bus_policy() {
+        let src = std::fs::read_to_string("src/enroll.rs").expect("enroll.rs source");
+        let mut methods = std::collections::BTreeSet::new();
+        for line in src.lines() {
+            let line = line.trim();
+            let rest = match line.strip_prefix("async fn ") {
+                Some(r) => r,
+                None => continue,
+            };
+            // Strip generic params: with_session<T> is one helper.
+            let name: String = rest
+                .chars()
+                .take_while(|c| *c != '(' && *c != '<')
+                .collect();
+            match name.as_str() {
+                // Internal helpers, not D-Bus methods. A new helper
+                // added here must be classified in this list, or the
+                // test fails until it is -- that is the point.
+                "caller_uid"
+                | "with_session"
+                | "next_session_id"
+                | "deliver_preview_map"
+                | "deliver_guidance_map" => continue,
+                // A signal, not a method call.
+                "enroll_progress" => continue,
+                _ => {}
+            }
+            let pascal: String = name
+                .split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect();
+            methods.insert(pascal);
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "ListPoses",
+            "StartEnrollment",
+            "EnrollPose",
+            "FinishEnrollment",
+            "CancelEnrollment",
+            "GetSessionInfo",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(methods, expected, "enroll.rs methods vs bus policy");
+    }
 }
