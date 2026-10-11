@@ -551,12 +551,19 @@ impl Daemon1 {
     /// unlock anything, touch the failure counter or change a setting.
     /// The requested identity name is sanitised and merely shown in the
     /// greeting; it is never trusted for anything.
+    ///
+    /// Polkit-gated on org.faceidnim.test like TestScan: otherwise any
+    /// local process (including a remote/inactive session) could paint
+    /// a fake "matched + Welcome <name>" on someone else's lock screen.
+    /// Promptless for the local active session, so the dev workflow of
+    /// tuning the animation without standing at the screen is unchanged.
     async fn preview_animation(
         &self,
         user: String,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _uid = self.caller_uid(&hdr).await?;
+        authz::require_polkit(&self.conn, &hdr, authz::ACTION_TEST).await?;
         let name: String = user.chars().filter(|c| !c.is_control()).take(24).collect();
         let ctxt = SignalContext::new(&self.conn, "/org/faceidnim/Daemon1")
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;

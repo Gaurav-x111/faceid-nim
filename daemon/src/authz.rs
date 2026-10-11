@@ -114,6 +114,8 @@ mod tests {
             "DeleteIdentity",
             "DeleteAllData",
             "Enroll",
+            "TestScan",
+            "PreviewAnimation",
         ] {
             assert!(bus.contains(&format!("send_member=\"{member}\"")));
         }
