@@ -22,6 +22,21 @@
 | daemon → UI | D-Bus signal carrying `(state, progress, reason)` | The extension is untrusted. It gets no frames, embeddings or scores. |
 | app → daemon | polkit (`daemon/src/authz.rs`, called from every write in `dbus.rs` and `enroll.rs`) | Enrolling must require the account password. |
 
+## Settings are global, not per-user (1B-4)
+
+`SetSettings` is gated on `org.faceidnim.settings` (`auth_self`), but
+the settings it writes -- `tau`, `mode`, `allowed_services`,
+`exclude_users`, strictness -- apply machine-wide. Any ONE
+authenticated active user can therefore change the unlock policy for
+every account on the machine (e.g. lower `tau`, or add another user to
+`exclude_users`). That is acceptable for a single-user laptop, which is
+what this release targets, but take note on a multi-user machine: there
+is no per-user settings scope and no admin-only role. Path fields
+(`data_dir`, sockets, log paths) are stripped server-side
+(`daemon/src/dbus.rs`, `set_settings`) so a caller cannot redirect the
+template store, and out-of-range values are clamped fail-closed
+(`daemon/src/config.rs`, `validate`).
+
 ## State machine
 
 ```

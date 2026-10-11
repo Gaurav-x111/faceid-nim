@@ -117,6 +117,39 @@ mod tests {
         ] {
             assert!(bus.contains(&format!("send_member=\"{member}\"")));
         }
+        // 1B-3 regression: the Enrollment1 interface must be an
+        // enumerated member list, never a blanket interface allow --
+        // a blanket allow silently exposes every future method added
+        // to the interface. Allow elements span lines, so scan element
+        // by element rather than line by line.
+        for member in [
+            "ListPoses",
+            "StartEnrollment",
+            "EnrollPose",
+            "FinishEnrollment",
+            "CancelEnrollment",
+            "GetSessionInfo",
+        ] {
+            assert!(
+                bus.contains(&format!("send_member=\"{member}\"")),
+                "Enrollment1 member {member} must be explicitly allowed"
+            );
+        }
+        let mut idx = 0;
+        let mut enumerated = 0;
+        while let Some(pos) = bus[idx..].find("send_interface=\"org.faceidnim.Enrollment1\"") {
+            let abs_pos = idx + pos;
+            let elem_start = bus[..abs_pos].rfind("<allow").expect("allow element");
+            let elem_end = bus[abs_pos..].find('>').expect("element end") + abs_pos;
+            let elem = &bus[elem_start..=elem_end];
+            assert!(
+                elem.contains("send_member="),
+                "blanket Enrollment1 allow (no send_member): {elem}"
+            );
+            enumerated += 1;
+            idx = elem_end + 1;
+        }
+        assert_eq!(enumerated, 6, "expected 6 enumerated Enrollment1 members");
     }
 
     /// 1B-2 regression: the TestScan action must stay promptless for
