@@ -120,9 +120,9 @@ override_dh_auto_install:
 	cp -r app/faceid_app $(DESTDIR)/usr/share/faceid-nim/app/
 	install -m 0644 app/faceid_app/style.css \
 	    $(DESTDIR)/usr/share/faceid-nim/app/faceid_app/
-	# Glance video-pill default opening (Opening page -> Preview video pill).
+	# Glance video-pill assets (the iphone opening video + lock-screen frames).
 	install -d $(DESTDIR)/usr/share/faceid-nim/linux-anim
-	cp -r linux-anim/glance_anim linux-anim/test_anim.py linux-anim/run.sh linux-anim/README.md $(DESTDIR)/usr/share/faceid-nim/linux-anim/
+	cp -r linux-anim/glance_anim linux-anim/test_anim.py linux-anim/run.sh $(DESTDIR)/usr/share/faceid-nim/linux-anim/
 	rm -rf $(DESTDIR)/usr/share/faceid-nim/linux-anim/glance_anim/__pycache__
 	install -d $(DESTDIR)/usr/share/applications
 	install -m 0644 app/data/org.faceidnim.App.desktop \
