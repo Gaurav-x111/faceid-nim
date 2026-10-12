@@ -13,7 +13,10 @@ lockout_secs = 60
 mode = "auto"
 camera = "/dev/video0"
 require_attention = true
-allowed_services = ["gdm-password", "sudo", "polkit-1", "login", "gnome-screensaver"]
+# H1: sudo and polkit-1 are deliberately absent. A face match must
+# never silently become a root path; additional services need an
+# explicit opt-in with a warning in the app.
+allowed_services = ["gdm-password", "login", "gnome-screensaver"]
 data_dir = "/var/lib/faceid-nim"
 worker_socket = "/run/faceid-nim/worker/vision.sock"
 auth_socket = "/run/faceid-nim/auth.sock"

@@ -552,6 +552,9 @@ mod tests {
             tau: 0.9,
             max_failures: 3,
             lockout_secs: 60,
+            // Tests exercise the sudo path explicitly (H1 opt-in):
+            // production defaults no longer include it.
+            allowed_services: vec!["sudo".into()],
             ..Config::default()
         };
         let audit = Arc::new(Audit::new(&dir.join("audit.log")));
@@ -708,6 +711,9 @@ mod tests {
         let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
         let cfg = Config {
             enabled: true,
+            // H1 opt-in: production defaults exclude sudo; tests that
+            // exercise the sudo path allow it explicitly.
+            allowed_services: vec!["sudo".into()],
             ..Config::default()
         };
         let audit = Arc::new(Audit::new(&dir.join("audit.log")));
@@ -775,6 +781,8 @@ mod tests {
             vote_n: 1,
             max_failures: 5,
             lockout_secs: 60,
+            // H1 opt-in: production defaults exclude sudo.
+            allowed_services: vec!["sudo".into()],
             ..Config::default()
         };
         let audit = Arc::new(Audit::new(&dir.join("audit.log")));

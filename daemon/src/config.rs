@@ -123,10 +123,14 @@ impl Default for Config {
             ir_camera: None,
             mode: CameraMode::Rgb,
             require_attention: true,
+            // H1: sudo and polkit-1 are NOT in defaults. A face match
+            // must never silently become a root path: gdm-password,
+            // login and gnome-screensaver stay (physical console), and
+            // anything else needs an explicit opt-in plus a warning in
+            // the app. Existing installs keep their on-disk list;
+            // this only governs fresh defaults.
             allowed_services: vec![
                 "gdm-password".into(),
-                "sudo".into(),
-                "polkit-1".into(),
                 "login".into(),
                 "gnome-screensaver".into(),
             ],
@@ -182,6 +186,38 @@ impl Config {
 
     pub fn service_allowed(&self, service: &str) -> bool {
         self.allowed_services.iter().any(|s| s == service)
+    }
+
+    /// H3/O1/O5: which incoming settings keys are security-sensitive.
+    /// Returns the changed protected key names (empty = cosmetic-only
+    /// change, the weaker ACTION_SETTINGS suffices). Compares against
+    /// the live config so a no-op resend of the same values does not
+    /// demand an admin password it does not need.
+    pub fn protected_settings_changed(&self, incoming: &Config) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.enabled != incoming.enabled {
+            out.push("enabled");
+        }
+        if (self.tau - incoming.tau).abs() > f32::EPSILON {
+            out.push("tau");
+        }
+        if self.strictness != incoming.strictness {
+            out.push("strictness");
+        }
+        if self.vote_k != incoming.vote_k || self.vote_n != incoming.vote_n {
+            out.push("votes");
+        }
+        if self.allowed_services != incoming.allowed_services {
+            out.push("allowed_services");
+        }
+        if self.max_failures != incoming.max_failures || self.lockout_secs != incoming.lockout_secs
+        {
+            out.push("lockout_policy");
+        }
+        if self.require_attention != incoming.require_attention {
+            out.push("require_attention");
+        }
+        out
     }
 
     /// Fail closed on a nonsense threshold rather than authenticating
@@ -329,5 +365,91 @@ mod tests {
         assert_eq!(c.camera, "/dev/video0", "camera silently fell back");
         assert_eq!(c.mode, CameraMode::Auto);
         assert_eq!(c.ir_camera, None);
+    }
+
+    /// H1: fresh defaults must not include privilege-escalation paths.
+    /// sudo and polkit-1 need an explicit opt-in with a warning.
+    #[test]
+    fn default_allowed_services_exclude_privileged_paths() {
+        let c = Config::default();
+        assert!(c.service_allowed("gdm-password"));
+        assert!(c.service_allowed("login"));
+        assert!(c.service_allowed("gnome-screensaver"));
+        assert!(!c.service_allowed("sudo"), "sudo needs explicit opt-in");
+        assert!(
+            !c.service_allowed("polkit-1"),
+            "polkit-1 needs explicit opt-in"
+        );
+        let text = std::fs::read_to_string("../packaging/faceid-nim-config.toml")
+            .expect("shipped default config");
+        assert!(
+            !text.contains("\"sudo\""),
+            "shipped config must not list sudo"
+        );
+        assert!(
+            !text.contains("\"polkit-1\""),
+            "shipped config must not list polkit-1"
+        );
+    }
+
+    /// H3/O1/O5: protected-key diffing. Cosmetic-only changes need no
+    /// elevation; any protected change is reported so SetSettings can
+    /// demand the admin action instead of smuggling through auth_self.
+    #[test]
+    fn protected_settings_diffing() {
+        let cur = Config::default();
+        // Identical resend: no elevation.
+        let same = Config::default();
+        assert!(cur.protected_settings_changed(&same).is_empty());
+        // Cosmetic-only (camera/mode/timeout display) stays empty.
+        let cosmetic = Config {
+            camera: "/dev/video9".into(),
+            mode: CameraMode::Auto,
+            timeline_enabled: !cur.timeline_enabled,
+            ..Config::default()
+        };
+        assert!(cur.protected_settings_changed(&cosmetic).is_empty());
+        // Each protected key flags.
+        let c = Config {
+            enabled: !cur.enabled,
+            ..Config::default()
+        };
+        assert!(cur.protected_settings_changed(&c).contains(&"enabled"));
+        let c = Config {
+            tau: 0.9,
+            ..Config::default()
+        };
+        assert!(cur.protected_settings_changed(&c).contains(&"tau"));
+        let c = Config {
+            strictness: Strictness::Heavy,
+            ..Config::default()
+        };
+        assert!(cur.protected_settings_changed(&c).contains(&"strictness"));
+        let c = Config {
+            vote_k: 9,
+            ..Config::default()
+        };
+        assert!(cur.protected_settings_changed(&c).contains(&"votes"));
+        let c = Config {
+            allowed_services: vec!["sudo".into()],
+            ..Config::default()
+        };
+        assert!(cur
+            .protected_settings_changed(&c)
+            .contains(&"allowed_services"));
+        let c = Config {
+            max_failures: 1,
+            ..Config::default()
+        };
+        assert!(cur
+            .protected_settings_changed(&c)
+            .contains(&"lockout_policy"));
+        let c = Config {
+            require_attention: !cur.require_attention,
+            ..Config::default()
+        };
+        assert!(cur
+            .protected_settings_changed(&c)
+            .contains(&"require_attention"));
     }
 }

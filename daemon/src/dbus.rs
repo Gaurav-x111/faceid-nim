@@ -609,10 +609,26 @@ impl Daemon1 {
         json: String,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
-        authz::require_polkit(&self.conn, &hdr, authz::ACTION_SETTINGS).await?;
         let mut incoming: Config = serde_json::from_str(&json)
             .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         incoming.validate();
+        // H3/O1/O5: two-tier authorization. Cosmetic changes go through
+        // ACTION_SETTINGS (auth_self); any change to a protected key
+        // (enabled, tau, strictness, votes, allowed services, lockout
+        // policy, attention) additionally requires ACTION_SETTINGS_SECURE
+        // (auth_admin). Checking the *diff* — not mere presence — stops
+        // smuggling protected keys through the weaker action while a
+        // no-op resend of identical values stays frictionless.
+        let protected = {
+            let cur = self.cfg.lock().await;
+            cur.protected_settings_changed(&incoming)
+        };
+        if protected.is_empty() {
+            authz::require_polkit(&self.conn, &hdr, authz::ACTION_SETTINGS).await?;
+        } else {
+            authz::require_polkit(&self.conn, &hdr, authz::ACTION_SETTINGS_SECURE).await?;
+            tracing::info!(keys = ?protected, "privileged settings change authorized");
+        }
         // Paths are daemon-owned. Accepting them over D-Bus would let a
         // caller point the template store anywhere.
         let mut cur = self.cfg.lock().await;

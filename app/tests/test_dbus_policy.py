@@ -87,7 +87,8 @@ def test_polkit_no_double_hyphen_in_comments():
 def test_polkit_test_action_present_and_promptless():
     text = _text(POLICY)
     for action in ("org.faceidnim.enroll", "org.faceidnim.settings",
-                   "org.faceidnim.delete", "org.faceidnim.enable",
+                   "org.faceidnim.settings-secure", "org.faceidnim.delete",
+                   "org.faceidnim.enable",
                    "org.faceidnim.preview", "org.faceidnim.test"):
         assert f'action id="{action}"' in text, action
     block = text[text.index('action id="org.faceidnim.test"'):]
@@ -95,6 +96,24 @@ def test_polkit_test_action_present_and_promptless():
     assert "<allow_any>no</allow_any>" in block
     assert "<allow_inactive>no</allow_inactive>" in block
     assert "<allow_active>yes</allow_active>" in block
+
+
+def test_polkit_privilege_tiers():
+    """H3/O1/O5 + H9: secure settings and PAM enablement need
+    auth_admin; deletion needs auth_self (never promptless)."""
+    text = _text(POLICY)
+
+    def block(action: str) -> str:
+        start = text.index(f'action id="{action}"')
+        seg = text[start:]
+        return seg[:seg.index("</action>")]
+
+    secure = block("org.faceidnim.settings-secure")
+    assert "<allow_active>auth_admin</allow_active>" in secure
+    delete = block("org.faceidnim.delete")
+    assert "<allow_active>auth_self</allow_active>" in delete
+    enable = block("org.faceidnim.enable")
+    assert "<allow_active>auth_admin</allow_active>" in enable
 
 
 def test_postinst_refreshes_polkit():

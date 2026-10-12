@@ -38,6 +38,15 @@ DeviceAllow=char-video4linux rw
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+# H10 (incremental, evidence-backed): the worker only speaks AF_UNIX
+# (daemon socket) and needs netlink for camera enumeration; it sets no
+# clock/hostname and reads no kernel logs. Verified with
+# `systemd-analyze verify`; live units untouched.
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

@@ -259,10 +259,19 @@ impl Enrollment1 {
         identity: String,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(String, zvariant::OwnedFd)> {
-        // Deliberately NO polkit here: opening a camera and showing a
-        // preview is unprivileged. Requiring a password just to let a
-        // user see the scanner they are about to use is what broke
-        // "face scan cannot start" when no auth agent was reachable.
+        // O3: enrollment opens the camera, so it needs proof of an
+        // active local session — but NOT a password yet (that comes at
+        // FinishEnrollment). ACTION_TEST is promptless for the active
+        // session and denied for remote/inactive ones, so it is exactly
+        // the "are you at this machine" check. Fail closed: if polkit
+        // cannot be reached, no session opens. The app surfaces the
+        // Failed error text directly.
+        authz::require_polkit(&self.conn, &hdr, authz::ACTION_TEST)
+            .await
+            .map_err(|e| {
+                tracing::warn!("enrollment refused: no active local session ({e})");
+                e
+            })?;
         let uid = self.caller_uid(&hdr).await?;
 
         if identity.is_empty()

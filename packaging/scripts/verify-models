@@ -57,7 +57,11 @@ PARSED="$(awk '
 [ -n "$PARSED" ] || { echo "verify-models: no [model.*] entries" >&2; exit 1; }
 
 fail=0
-TMPF="$(mktemp /tmp/.faceid-verify.XXXXXX)"
+# H7: never stage parsed manifest data under world-readable /tmp. The
+# model dir is root-owned 0755; a dotfile there is only listable by
+# root, unlike /tmp/.faceid-verify.* which any local user could read
+# while verification runs.
+TMPF="$(mktemp "$MODEL_DIR/.faceid-verify.XXXXXX")"
 trap 'rm -f "$TMPF"' EXIT INT TERM
 printf '%s\n' "$PARSED" > "$TMPF"
 

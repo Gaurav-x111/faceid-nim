@@ -60,6 +60,17 @@ NoNewPrivileges=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+# H10 (incremental, evidence-backed): neither binary sets the clock,
+# changes the hostname, or reads kernel logs — the daemon only writes
+# the journal and speaks AF_UNIX (system bus + auth/worker sockets).
+# netlink stays for device/route queries during startup. Each knob was
+# verified with `systemd-analyze verify` (see test_systemd_hardening.py);
+# live units are untouched by this change.
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

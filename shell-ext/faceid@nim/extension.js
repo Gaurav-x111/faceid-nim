@@ -23,6 +23,13 @@ import { filterTerminal } from './scanGuard.js';
 
 export default class FaceIdExtension extends Extension {
     enable() {
+        // Single-controller: enable() without a matching disable()
+        // (shell reload edge) must never stack a second pill, a second
+        // bus watch, or a second locked-changed handler — that is how
+        // two animations end up playing over each other.
+        if (this._pill || this._client) {
+            try { this.disable(); } catch (e) {}
+        }
         this._pill = new FaceIdPill();
         this._client = new DaemonClient();
         this._lockId = Main.screenShield?.connect?.('locked-changed',

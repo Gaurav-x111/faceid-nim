@@ -251,9 +251,27 @@ CFG
         && "$LIBEXEC/sync-systemd-state" \
             faceid-nimd.service faceid-vision.service || true
 
+    # Report the configured state truthfully: a fresh install is
+    # always disabled (config written above with enabled=false), but a
+    # reinstall/upgrade preserves the existing config, so claiming
+    # DISABLED unconditionally contradicts `faceid-nim status` when the
+    # user already opted in. Read the live flag instead.
+    _ENABLED="false"
+    if [ -r /etc/faceid-nim/config.toml ]; then
+        _ENABLED="$(awk '$0 ~ /^[[:space:]]*enabled[[:space:]]*=/ \
+            { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/[";]/, ""); \
+              sub(/[[:space:]]*#.*$/, ""); print; exit }' \
+            /etc/faceid-nim/config.toml 2>/dev/null || echo false)"
+    fi
+    if [ "$_ENABLED" = "true" ]; then
+        _STATE_LINE="faceid-nim installed. Face unlock is ENABLED (per /etc/faceid-nim/config.toml)."
+    else
+        _STATE_LINE="faceid-nim installed. Face unlock is DISABLED (fresh installs stay off until you opt in)."
+    fi
+
     cat <<MSG
 
-faceid-nim installed. Face unlock is DISABLED.
+$_STATE_LINE
 
   $MODELS_LINE
   $LIVE
