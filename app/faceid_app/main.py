@@ -1137,6 +1137,18 @@ class Window(Adw.ApplicationWindow):
         anti_ok = bool(live.get("antispoof"))
         if marks_ok and anti_ok:
             return {"ok": True, "summary": "", "detail": ""}
+        if marks_ok and not anti_ok:
+            # ML anti-spoof deliberately off on this hardware: no
+            # verified export passes on the camera (each tested model
+            # calls live faces spoofs), so the worker runs the
+            # classical cues instead. Unlock is fully working — say so
+            # first, or every user reads this as breakage.
+            return {"ok": False,
+                    "summary": "ML anti-spoof off — classical checks active",
+                    "detail": ("Face unlock works normally. Running: "
+                               "moire, glare, blink, 3D and attention "
+                               "checks. The ML model stays off: no verified "
+                               "export passes on this camera.")}
         lost = []
         if not marks_ok:
             lost.append("blink / 3D / attention")
