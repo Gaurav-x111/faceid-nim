@@ -241,7 +241,7 @@ PY
             _active="$(awk -F'"' '/\"active\"/ {print $4; exit}' "$_home/.config/faceid-nim/openings.json" 2>/dev/null || true)"
             _face="$(awk -F'"' '/\"scan_face\"/ {print $4; exit}' "$_home/.config/faceid-nim/openings.json" 2>/dev/null || true)"
             echo "  active animation: ${_active:-unknown} (scan_face: ${_face:-unknown})"
-            echo "                   (app preview: Gtk.Video/Cairo · lock: PNG frames/Clutter — see docs/animation-runtime-audit.md)"
+            echo "                   (lock: PNG frames/Clutter; verify with Try-it-live in the app)"
         else
             echo "  active animation: iphone (packaged default)"
         fi

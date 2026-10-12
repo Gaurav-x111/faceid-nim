@@ -47,9 +47,9 @@ install: all
 	# python (the venv above is for the worker only and has no GTK).
 	install -d $(DESTDIR)$(PREFIX)/share/faceid-nim/app/faceid_app
 	cp -r app/faceid_app/. $(DESTDIR)$(PREFIX)/share/faceid-nim/app/faceid_app/
-	# Glance video-pill preview harness (Opening page -> Preview video pill).
+	# Glance video-pill assets (the iphone opening video + lock-screen frames).
 	install -d $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim
-	cp -r linux-anim/glance_anim linux-anim/test_anim.py linux-anim/run.sh linux-anim/README.md $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim/
+	cp -r linux-anim/glance_anim linux-anim/test_anim.py linux-anim/run.sh $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim/
 	rm -rf $(DESTDIR)$(PREFIX)/share/faceid-nim/linux-anim/glance_anim/__pycache__
 	install -m 0755 packaging/faceid-app $(DESTDIR)/usr/bin/faceid-app
 	install -m 0755 packaging/scripts/gpu-devices $(DESTDIR)$(LIBEXEC)/
