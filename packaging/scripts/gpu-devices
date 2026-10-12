@@ -17,9 +17,9 @@
 # script writes nothing and the unit keeps its tighter default.
 set -eu
 
-CONF_DIR=/run/faceid-nim/systemd
-DROPIN_DIR=/etc/systemd/system/faceid-vision.service.d
-STATE=/run/faceid-nim/gpu-devices
+CONF_DIR=${CONF_DIR:-/run/faceid-nim/systemd}
+DROPIN_DIR=${DROPIN_DIR:-/etc/systemd/system/faceid-vision.service.d}
+STATE=${STATE_FILE:-/run/faceid-nim/gpu-devices}
 
 # DeviceAllow is matched on the *device node type*, not a path, so a
 # glob like /dev/nvidia* is not expressible here. These are the character
@@ -33,9 +33,16 @@ DeviceAllow=char-nvidia-uvm rw'
 # @system-service set; without this they get EPERM and the provider
 # fails at init. CapabilityBoundingSet stays EMPTY: device access plus
 # the existing sandbox is enough, and adding capabilities is not.
-SYSCALLS='SystemCallFilter=@system-service @aio @signal @chown @setuid @setgid @resource'
+# Group names must be real systemd groups: unknown names are silently
+# ignored, leaving the sandbox weaker than intended with only a journal
+# warning (@setgid and @resource were both bogus; setgid(2) lives in
+# @setuid, and the memory group is spelled @resources).
+SYSCALLS='SystemCallFilter=@system-service @aio @signal @chown @setuid @resources'
 
 have_accel() {
+    # FAKE_ACCEL=1 is a test hook so the generator is verifiable
+    # without real hardware; it has no effect on production runs.
+    [ "${FAKE_ACCEL:-0}" = "1" ] && return 0
     [ -e /dev/dri/renderD128 ] && return 0
     [ -d /dev/nvidiactl ] && return 0
     [ -e /dev/nvidia0 ] && return 0
