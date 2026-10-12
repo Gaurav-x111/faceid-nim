@@ -1,0 +1,17 @@
+#!/bin/sh
+# record-unit-state <unit>... -- remember which units are enabled.
+#
+# prerm disables the daemons on remove/purge/deconfigure (a running
+# daemon with deleted binaries is worse than a stopped one), but a
+# same-version reinstall passes through prerm too. Without a record,
+# postinst cannot tell "we stopped it seconds ago" from "the admin
+# deliberately turned it off", and the units stay off forever.
+# RUNDIR override exists for tests; production always uses the daemon
+# runtime dir (root-owned, created by the units themselves).
+RUNDIR=${RUNDIR:-/run/faceid-nim}
+for unit in "$@"; do
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+        mkdir -p "$RUNDIR" 2>/dev/null || true
+        : > "$RUNDIR/was-enabled-$unit" 2>/dev/null || true
+    fi
+done

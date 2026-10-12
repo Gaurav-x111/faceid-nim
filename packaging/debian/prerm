@@ -10,6 +10,12 @@ case "$1" in
   # referencing a module that no longer exists (round-2 audit).
   remove|purge|deconfigure)
     pam-auth-update --package --remove faceid-nim || true
+    # Record first: a reinstall passes through here too, and postinst
+    # must be able to tell "we stopped it" from "the admin stopped it".
+    # The helper lives in the tree being removed, so tolerate absence.
+    [ -x /usr/libexec/faceid-nim/record-unit-state ] \
+        && /usr/libexec/faceid-nim/record-unit-state \
+            faceid-nimd.service faceid-vision.service || true
     systemctl disable --now faceid-vision.service || true
     systemctl disable --now faceid-nimd.service || true
     ;;

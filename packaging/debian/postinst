@@ -208,6 +208,15 @@ CFG
     # --- services -----------------------------------------------------
     systemctl daemon-reload || true
     systemctl enable --now faceid-nim-fetch-models.service || true
+    # Restore units prerm recorded as previously enabled: a reinstall
+    # passes through prerm's disable, and without this the units stay
+    # off (restart-if-active only restarts *running* units, and the
+    # was-enabled record below only covers debhelper bookkeeping).
+    # Flags are consumed either way, so a stale flag can never
+    # re-enable a unit the admin turned off afterwards.
+    [ -x "$LIBEXEC/restore-unit-state" ] \
+        && "$LIBEXEC/restore-unit-state" \
+            faceid-nimd.service faceid-vision.service || true
     if [ -n "${2:-}" ]; then
         # Upgrade ($2 is the previously installed version):
         # dh_installsystemd runs with --no-stop-on-upgrade, so the OLD
