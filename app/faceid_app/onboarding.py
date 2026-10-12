@@ -31,7 +31,6 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk  # noqa: E402
 
 from .dbus_client import Daemon, DaemonError, Enrollment  # noqa: E402
-from . import prefs  # noqa: E402
 
 # Status strings from daemon/src/enroll.rs. Kept as constants so a
 # rename on either side shows up as a NameError, not a silent no-op.
@@ -691,22 +690,15 @@ class OnboardingWindow(Adw.Window):
             self._scan_source = 0
 
     # ---- flow ----------------------------------------------------------
-    @staticmethod
-    def _friendly_diag(key: str, value) -> str:
-        if value is None:
-            return "not set"
-        if value is True:
-            return "yes"
-        if value is False:
-            return "no"
-        if key == "ir_camera" and not str(value):
-            return "not set"
-        return str(value)
-
     def _toast(self, text: str) -> None:
         self.toasts.add_toast(Adw.Toast(title=text))
 
     def _go_camera(self) -> None:
+        # Pre-scan gate, not a diagnostics screen: the only question
+        # answered here is "can a scan start?". The full diagnostics
+        # dump used to live on this page and filled the whole dialog;
+        # it now lives on the main window's Diagnostics page, and this
+        # page shows one compact summary row at most.
         self.stack.set_visible_child_name("camera")
         child = self.camera_list.get_first_child()
         while child is not None:
@@ -723,23 +715,26 @@ class OnboardingWindow(Adw.Window):
             self.camera_next.set_sensitive(False)
             return
 
-        ok = bool(diag.get("worker_reachable"))
-        for key, value in diag.items():
-            row = Adw.ActionRow(title=prefs.diag_title(key),
-                                subtitle=self._friendly_diag(key, value))
-            self.camera_list.append(row)
-
-        if ok:
-            self.camera_status.set_title("Camera looks fine")
-            self.camera_status.set_description(
-                "Sit facing the screen in even light. Take off anything "
-                "covering your face.")
-        else:
+        if not bool(diag.get("worker_reachable")):
             self.camera_status.set_title("The vision worker is not running")
             self.camera_status.set_description(
                 "Models may not be downloaded yet.\n"
                 "Run:  sudo faceid-nim fetch-models")
-        self.camera_next.set_sensitive(ok)
+            self.camera_next.set_sensitive(False)
+            return
+
+        cam = diag.get("camera") or "camera"
+        mode = diag.get("mode") or "auto"
+        row = Adw.ActionRow(
+            title="Camera ready",
+            subtitle=f"{cam} · mode {mode} — full detail "
+                     "on the Diagnostics page")
+        self.camera_list.append(row)
+        self.camera_status.set_title("Camera looks fine")
+        self.camera_status.set_description(
+            "Sit facing the screen in even light. Take off anything "
+            "covering your face.")
+        self.camera_next.set_sensitive(True)
 
     def _go_enroll(self) -> None:
         self.stack.set_visible_child_name("enroll")

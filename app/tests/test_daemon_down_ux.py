@@ -108,3 +108,36 @@ def test_liveness_health_reports_missing_antispoof():
     healthy = Window._liveness_health(
         {"liveness": {"landmarks_ok": True, "antispoof": True}})
     assert healthy["ok"] is True
+
+
+def test_enroll_camera_page_has_no_diag_dump():
+    """The enrollment wizard's camera page is a pre-scan gate, not a
+    diagnostics screen: it must not iterate the whole diagnostics dict
+    into rows (that filled the dialog and buried the Start button)."""
+    src = _src(REPO / "app" / "faceid_app" / "onboarding.py")
+    body = _method_body(src, "_go_camera")
+    assert "for key, value in diag.items()" not in body
+    assert "diag.items()" not in body
+    # Raw-dict subtitles must be gone; one compact summary row at most.
+    assert "Camera ready" in body
+    assert "Diagnostics page" in body
+
+
+def test_enroll_camera_gate_kept():
+    """The dump is gone but the safety gate stays: daemon-down and
+    worker-down both keep Start disabled with an actionable message."""
+    src = _src(REPO / "app" / "faceid_app" / "onboarding.py")
+    body = _method_body(src, "_go_camera")
+    assert "Cannot reach the service" in body
+    assert "faceid-nim status" in body
+    assert "worker_reachable" in body
+    assert "fetch-models" in body
+    assert body.count("camera_next.set_sensitive(False)") >= 2
+    assert "camera_next.set_sensitive(True)" in body
+
+
+def test_full_diag_still_on_diagnostics_page():
+    """The detail removed from the wizard must exist on the main
+    window's Diagnostics page, not vanish entirely."""
+    body = _method_body(_src(MAIN_PY), "_apply_refresh")
+    assert "for k, v in diag.items()" in body
