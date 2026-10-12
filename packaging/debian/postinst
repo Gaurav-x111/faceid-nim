@@ -233,10 +233,11 @@ CFG
     systemctl try-restart polkit.service || true
 
     # --- debhelper state sync --------------------------------------
-    # Must run before the #DEBHELPER# autoscripts below: a unit enabled
-    # by hand has real symlinks but a stale was-enabled=false record,
-    # and the autoscripts would strip the symlinks again on this very
-    # install. Syncing records reality without enabling anything new.
+    # Must run before the generated maintainer-script blocks at the
+    # end of this file: a unit enabled by hand has real symlinks but a
+    # stale was-enabled=false record, and those blocks would strip the
+    # symlinks again on this very install. Syncing records reality
+    # without enabling anything new.
     [ -x "$LIBEXEC/sync-systemd-state" ] \
         && "$LIBEXEC/sync-systemd-state" \
             faceid-nimd.service faceid-vision.service || true

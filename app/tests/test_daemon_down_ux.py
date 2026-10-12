@@ -160,3 +160,25 @@ def test_rules_helper_install_lines_have_tabs():
             assert line.startswith("\t"), f"missing tab: {line!r}"
     # The helper really is installed by the rule.
     assert "restart-if-active" in body
+
+
+def test_debhelper_token_appears_exactly_once():
+    """Only the real marker line may contain #DEBHELPER#. A stray copy
+    inside a comment (e.g. describing the autoscripts) makes debhelper
+    inject its blocks mid-file: the 2026-10-12 build died in postinst
+    with 'autoscripts: not found' (exit 127, package half-configured)
+    because a comment fragment lost its '#' and ran as a command."""
+    import pathlib
+    hits = []
+    for name in ("postinst", "rules", "prerm"):
+        p = REPO / "packaging" / "debian" / name
+        if not p.is_file():
+            continue
+        for i, line in enumerate(p.read_text().splitlines(), 1):
+            if "#DEBHELPER#" in line:
+                hits.append((name, i, line))
+    # Each maintainer script has exactly one real marker, alone on its
+    # line; anything else (e.g. the token inside a comment) makes
+    # debhelper inject blocks mid-file.
+    assert sorted(h[0] for h in hits) == ["postinst", "prerm"], hits
+    assert all(h[2] == "#DEBHELPER#" for h in hits), hits
