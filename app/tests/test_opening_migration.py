@@ -36,3 +36,25 @@ def test_missing_config_is_iphone_default(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     assert openings.load()["active"] == "iphone"
     assert "iphone" in openings.BUILTIN and "glance" not in openings.BUILTIN
+
+
+def test_load_writes_back_migration(tmp_path, monkeypatch):
+    """load() must persist glance→iphone, or the file keeps a stale id
+    the lock screen reads literally while the app shows the migrated
+    one (select-then-plays-another bug: on_opening_selected early-
+    returns on the in-memory value and never saves)."""
+    import json
+    from faceid_app import openings
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cfg_path = home / "faceid-nim" / "openings.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(
+        {"active": "glance", "variants": {}, "scan_face": "arena"}))
+    cfg = openings.load()
+    assert cfg["active"] == "iphone"
+    assert cfg["scan_face"] == "arena"
+    on_disk = json.loads(cfg_path.read_text())
+    assert on_disk["active"] == "iphone", on_disk

@@ -166,6 +166,14 @@ def default_config() -> dict:
 
 
 def load() -> dict:
+    """Load openings.json, migrating legacy values.
+
+    Migrations (glance→iphone, unknown→iphone default, bad
+    scan_face→apple) are written back when they change anything, so a
+    stale file cannot keep shadowing the in-memory state forever: the
+    app shows one thing while the lock screen (which reads the file)
+    plays another.
+    """
     cfg = default_config()
     try:
         with open(config_path(), "r", encoding="utf-8") as f:
@@ -185,6 +193,16 @@ def load() -> dict:
         cfg["active"] = active if active in all_ids(cfg) else "iphone"
         face = str(data.get("scan_face", DEFAULT_SCAN_FACE))
         cfg["scan_face"] = face if face in SCAN_FACES else DEFAULT_SCAN_FACE
+        # Write back when migration changed anything on disk: without
+        # this the file keeps a stale id (e.g. "glance") that the lock
+        # screen reads literally, while the app shows the migrated one.
+        try:
+            if (str(data.get("active", "iphone")) != cfg["active"]
+                    or str(data.get("scan_face", DEFAULT_SCAN_FACE))
+                    != cfg["scan_face"]):
+                save(cfg)
+        except Exception:
+            pass
     except (OSError, ValueError):
         pass
     return cfg
