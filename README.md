@@ -306,7 +306,7 @@ scan it clears can still be vetoed by glare, moiré, planarity or IR.
 | Model | MiniFASNet-V2 (`2.7_80x80`), ONNX opset 11, ~1.7 MB |
 | Source | `garciafido/minifasnet-v2-anti-spoofing-onnx` (Hugging Face) — a format conversion of the upstream `minivision-ai/Silent-Face-Anti-Spoofing` weights, bit-equivalent |
 | License | Apache-2.0, same as upstream |
-| Pin | SHA-256 in `models/manifest.toml`; the worker refuses to load a file that does not match |
+| Pin | SHA-256 in `models/manifest.toml`; the worker refuses to load a file that does not match. Currently **unpinned** (see measurement below), so fresh installs skip it |
 
 **Why use it.** The classical cues catch most print/screen replay, but
 they are hand-written heuristics. The CNN adds a learned
@@ -352,6 +352,30 @@ sudo systemctl restart faceid-vision.service
 fires, and `verify-models` still passes (optional models are allowed to
 be absent). It stays off across reboots; only an explicit
 `sudo faceid-nim fetch-models` downloads it again.
+
+**Measured on real hardware (2026-10-12, Integrated_Webcam_FHD
+MJPG/YUYV 640x480).** The pinned export had to come out: it scored a
+live face as replay attack at **p ≈ 0.994, stable across every frame**,
+crop scale (1.0x–3.5x), channel order and pixel format — while pinned,
+no unlock could succeed (`liveness_deny:antispoof_model`,
+`valid_frames: 1`). Follow-up hunt, same live face, same bar (clearly
+live on most frames, then a phone-screen spoof must score clearly
+spoof under the same mapping before anything gets pinned):
+
+| Candidate | Result |
+|---|---|
+| MiniFASNet-V2, independent export (same weights) | 0.994 spoof — the export was never the problem |
+| MiniFASNet-V1SE (scale 4.0) | 0.973 stable spoof — family-wide failure on this sensor |
+| facenox `best_model.onnx` (Apache-2.0, 2-class, 128 RGB) | logit diff swinging −5.1…+6.3 frame-to-frame — unusable as a gate |
+
+Every tested CNN reads this webcam's live faces as attacks, so `ML
+anti-spoof: unavailable` is the honest state here, not a bug. The
+classical cues (moiré, glare, device-frame, blink, planarity,
+attention) plus landmarks stay active, and unlock is proven working
+without the CNN. One variable was never controlled: bright frontal
+light — retest in it before declaring ML liveness impossible on a
+given machine. Do not re-pin any export without live-face **and**
+spoof-sample evidence measured on the target camera.
 
 **Honest limits.** These models lose accuracy on cameras and lighting
 they were not trained on, which is exactly why it is one vote, not the
