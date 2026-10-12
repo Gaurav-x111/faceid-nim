@@ -19,7 +19,7 @@ Pages:
    Cameras     -- detected cameras + rescan
    Security    -- the honest limitations, plus delete-everything
    Settings    -- strictness, camera source, scan timeout, attention,
-                  plus Appearance & Animation (selection + preview)
+                   plus Appearance & Animation (selection + live test scan)
    Diagnostics -- daemon state + copyable CLI commands
    (The former top-level "Opening" page was migrated into
    Settings → Appearance & Animation; persisted openings.json values,
@@ -98,28 +98,9 @@ def github_image(size: int = 16) -> Gtk.Image:
         pass
     return Gtk.Image(icon_name=GITHUB_ICON_FALLBACK, pixel_size=size)
 
-# Canonical preview states (Phase 2 state model). These are presentation
-# only: they select which visual/asset the preview shows and must never
-# drive an authentication decision. Production ScanState values map onto
-# them via SCAN_STATE_TO_PREVIEW below.
-PREVIEW_STATES = ("scanning", "recognized", "denied")
-PREVIEW_STATE_LABELS = ["Scanning", "Recognized", "Denied"]
-
-# Authoritative daemon/shell ScanState -> canonical preview state.
-# waking/searching/verifying are all "in progress"; matched is terminal
-# success; rejected/timeout/camera_error are terminal failure presentations
-# (timeout/camera_error surface their own reason text but share the denied
-# visual). Unknown/empty signals fall back to scanning, never to a
-# fabricated success.
-SCAN_STATE_TO_PREVIEW = {
-    "waking": "scanning",
-    "searching": "scanning",
-    "verifying": "scanning",
-    "matched": "recognized",
-    "rejected": "denied",
-    "timeout": "denied",
-    "camera_error": "denied",
-}
+# Simulated appearance previews were removed 2026-10-12: canned
+# scanning/recognized/denied visuals drifted from what the lock pill
+# actually plays, so the Appearance page offers a real TestScan instead.
 
 # Human-readable scan-face labels <-> stored values. The stored values
 # (iphone/apple/arena/classic) are persisted in openings.json and read
@@ -127,69 +108,6 @@ SCAN_STATE_TO_PREVIEW = {
 # logs. "iphone" and "apple" render the same iPhone-style face.
 SCAN_FACE_VALUES = ["iphone", "apple", "arena", "classic"]
 SCAN_FACE_LABELS = ["iPhone (default)", "Smile", "Orbit", "Classic"]
-
-
-def canonical_preview_state(scan_state: str) -> str:
-    """Map a daemon ScanState signal to a canonical preview state."""
-    return SCAN_STATE_TO_PREVIEW.get(str(scan_state or ""), "scanning")
-
-
-def preview_plan_for_state(active: str, state: str, cfg: dict | None = None) -> dict:
-    """Daemon-free preview plan for Settings → Appearance & Animation.
-
-    Returns {kind, asset, heading, body} where kind is 'video' (play
-    this mp4 in the existing Gtk.Video renderer), 'cairo' (paint the
-    existing Cairo splash), or 'none' (nothing to play + reason in
-    body). Only reads local files (openings spec + clip existence) —
-    it never touches D-Bus, PAM, or the camera, so every canned state
-    previews with the daemon stopped.
-    """
-    from . import openings as _openings
-
-    active = active or "iphone"
-    state = state if state in PREVIEW_STATES else "scanning"
-    spec = _openings.spec(cfg or {}, active) or {}
-    if not spec or active == "none":
-        return {"kind": "none", "asset": "",
-                "heading": spec.get("name") or "Animation",
-                "body": "“No splash” selected — nothing to preview."}
-    clip_key = {"scanning": "iphone", "recognized": "success",
-                "denied": "failure"}.get(state, "iphone")
-    mp4 = ""
-    if active == "iphone":
-        try:
-            mp4 = _openings.glance_asset(
-                _openings.GLANCE_CLIPS.get(clip_key, ""))
-        except Exception:
-            mp4 = ""
-        if mp4 and os.path.exists(mp4):
-            bodies = {
-                "scanning": "The real unlock video — same clip the lock "
-                            "screen plays. Loops until closed.",
-                "recognized": "The success clip for this variant. Loops "
-                              "until closed.",
-                "denied": "The failure video for this variant. Loops "
-                          "until closed.",
-            }
-            return {"kind": "video", "asset": mp4,
-                    "heading": spec.get("name") or "Animation",
-                    "body": bodies[state] + " Preview only."}
-    notes = {
-        "scanning": "Live preview — same timing as the lock screen. "
-                    "Loops until closed.",
-        "recognized": "No clip for this variant — the lock pill shows "
-                      "the green check + Verified card. Splash timing "
-                      "below matches the lock screen.",
-        "denied": "No failure video for this variant — the lock pill "
-                  "shows the red glyph + shake. Splash timing below "
-                  "matches the lock screen.",
-    }
-    body = notes[state] + " Preview only."
-    if active == "iphone" and not mp4:
-        body += " (Unlock video missing — reinstall or run " \
-                "`sudo faceid-nim fetch-models`.)"
-    return {"kind": "cairo", "asset": "",
-            "heading": spec.get("name") or "Animation", "body": body}
 
 
 SERVICE_DOWN_FRIENDLY = \
@@ -253,14 +171,6 @@ def _combo_index(combo, idx: int) -> int:
     if idx is None or idx < 0 or idx >= max(1, n):
         return 0
     return idx
-
-
-def _rgba_tuple(text: str) -> tuple:
-    """'#rrggbb' / 'rgba(...)' -> (r, g, b, a) floats, dark fallback."""
-    c = Gdk.RGBA()
-    if c.parse(str(text or "")):
-        return (c.red, c.green, c.blue, c.alpha)
-    return (0.082, 0.11, 0.15, 1.0)
 
 
 def _rgba_hex(rgba) -> str:
@@ -348,25 +258,6 @@ CLI_COMMANDS = [
     ("Watch daemon + worker logs", "journalctl -fu faceid-nimd -u faceid-vision"),
     ("Live D-Bus signal trace", "gdbus monitor --system --dest org.faceidnim.Daemon1"),
 ]
-
-def _find_video_pill_harness() -> str:
-    """Locate linux-anim/test_anim.py (Glance video-pill preview harness).
-
-    Dev tree first (repo root/linux-anim), then installed locations.
-    Returns "" when not found so the caller can toast instead of crashing.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "..", "..", "linux-anim", "test_anim.py"),
-        "/usr/share/faceid-nim/linux-anim/test_anim.py",
-        "/usr/share/glance-anim/test_anim.py",
-    ]
-    for c in candidates:
-        p = os.path.normpath(c)
-        if os.path.isfile(p):
-            return p
-    return ""
-
 
 def run_diagnose() -> int:
     """Terminal cameras+service report, no GUI needed (--diagnose)."""
@@ -886,7 +777,7 @@ class Window(Adw.ApplicationWindow):
         page.add(advanced)
         # Appearance & Animation lives under Settings (not a top-level
         # page). The groups below own cb_opening/cb_scan_face/etc exactly
-        # once, so selection, preview and persistence stay wired.
+        # once, so selection and persistence stay wired.
         for grp in self._appearance_groups():
             page.add(grp)
         return page
@@ -1263,7 +1154,7 @@ class Window(Adw.ApplicationWindow):
     # ---- appearance & animation UI (Settings subsection) --------------
     def _appearance_groups(self) -> list:
         """Build the Appearance & Animation groups. Called once from
-        _settings_page so selection + preview live under Settings.
+        _settings_page so selection lives under Settings.
         Persisted openings.json ids/values are unchanged."""
         groups: list = []
 
@@ -1295,35 +1186,6 @@ class Window(Adw.ApplicationWindow):
         self._opening_notify_id = self.cb_opening.connect(
             "notify::selected", self.on_opening_selected)
         sel.add(self.cb_opening)
-
-        prev = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
-                       margin_top=4)
-        self.preview_area = Gtk.DrawingArea(width_request=46,
-                                            height_request=30)
-        self.preview_area.set_draw_func(self._draw_opening_preview, None)
-        prev.append(self.preview_area)
-        self.preview_label = Gtk.Label(label="", xalign=0, hexpand=True,
-                                       wrap=True)
-        self.preview_label.add_css_class("dim-label")
-        prev.append(self.preview_label)
-        sel.add(prev)
-
-        # Canonical preview state selector: scanning / recognized / denied.
-        # Presentation only — it chooses which visual the preview below
-        # plays and never touches authentication.
-        self.cb_preview_state = Adw.ComboRow(
-            title="Preview state",
-            subtitle="Scanning shows the in-progress visual, Recognized "
-                     "the success clip, Denied the failure visual",
-            model=Gtk.StringList.new(PREVIEW_STATE_LABELS))
-        self.cb_preview_state.set_selected(0)
-        self.cb_preview_state.connect("notify::selected",
-                                      self._on_preview_state_changed)
-        sel.add(self.cb_preview_state)
-        self.preview_state_label = Gtk.Label(label="Selected state: Scanning",
-                                             xalign=0)
-        self.preview_state_label.add_css_class("dim-label")
-        sel.add(self.preview_state_label)
         groups.append(sel)
 
         faceg = Adw.PreferencesGroup(
@@ -1334,71 +1196,28 @@ class Window(Adw.ApplicationWindow):
                         "the look.")
         self.cb_scan_face = Adw.ComboRow(
             title="Scan face",
-            subtitle="Smile (face outline, default), Orbit (halo/crest) or Classic",
+            subtitle="iPhone (default), Smile (same face), Orbit (halo/crest) or Classic",
             model=Gtk.StringList.new(SCAN_FACE_LABELS))
         self._scanface_notify_id = self.cb_scan_face.connect(
             "notify::selected", self.on_scan_face_selected)
         faceg.add(self.cb_scan_face)
-
-        self._scan_face_previews = []
-        preview_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                               spacing=8, margin_top=4)
-        for i, (label, icon_name) in enumerate((
-                ("Smile", "face-smile-symbolic"),
-                ("Orbit", "face-orbit-symbolic"),
-                ("Classic", "face-classic-symbolic"))):
-            btn = Gtk.Button(icon_name=icon_name, tooltip_text=label,
-                             valign=Gtk.Align.CENTER)
-            btn.add_css_class("flat")
-            btn.add_css_class("circular")
-            btn.connect("clicked",
-                        lambda _b, idx=i: self.cb_scan_face.set_selected(idx))
-            preview_box.append(btn)
-            self._scan_face_previews.append(btn)
-        faceg.add(preview_box)
         groups.append(faceg)
 
-        pvgroup = Adw.PreferencesGroup(
-            title="Preview",
-            description="Plays the selected variant's own assets for the "
-                        "state chosen above — never another variant's "
-                        "hard-coded clip. All are previews only — no "
-                        "camera, no authentication.")
-        vrow = Adw.ActionRow(
-            title="Preview video pill (mp4)",
-            subtitle="Full Glance unlock video "
-                     "(linux-anim test window)")
-        vb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
-        vb.add_css_class("suggested-action")
-        vb.connect("clicked", self._preview_video_pill)
-        vrow.add_suffix(vb)
-        pvgroup.add(vrow)
-        prow = Adw.ActionRow(
-            title="Play on the lock pill (needs daemon)",
-            subtitle="Ring sweep, check, Verified, Welcome on the real "
-                     "pill via PreviewAnimation — needs faceid-nimd; "
-                     "the clip previews play without it")
-        pb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
-        pb.connect("clicked", self._preview_success)
-        prow.add_suffix(pb)
-        pvgroup.add(prow)
-        orow = Adw.ActionRow(
-            title="Preview selected state",
-            subtitle="Play the scanning / recognized / denied visual for "
-                     "the active animation")
-        ob = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
-        ob.add_css_class("suggested-action")
-        ob.connect("clicked", self._preview_selected_state)
-        orow.add_suffix(ob)
-        pvgroup.add(orow)
-        drow = Adw.ActionRow(
-            title="Preview denied visual",
-            subtitle="Failure clip or red glyph for the active animation")
-        db = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
-        db.connect("clicked", self._preview_denied)
-        drow.add_suffix(db)
-        pvgroup.add(drow)
-        groups.append(pvgroup)
+        livegroup = Adw.PreferencesGroup(
+            title="Try it live",
+            description="Runs a real scan through the camera and the "
+                        "daemon — the lock pill animates exactly as when "
+                        "you open the laptop. Recognised / Not recognised, "
+                        "nothing is unlocked.")
+        liverow = Adw.ActionRow(
+            title="Run a real scan now",
+            subtitle="Look at the camera; the result toasts below")
+        livebtn = Gtk.Button(label="Scan", valign=Gtk.Align.CENTER)
+        livebtn.add_css_class("suggested-action")
+        livebtn.connect("clicked", self.on_test)
+        liverow.add_suffix(livebtn)
+        livegroup.add(liverow)
+        groups.append(livegroup)
 
         make = Adw.PreferencesGroup(title="Make your own")
         row = Adw.ActionRow(
@@ -1480,124 +1299,6 @@ class Window(Adw.ApplicationWindow):
         openings.save(self._openings)
         logging.getLogger("faceid_app").info("scan face changed")
 
-    def _on_preview_state_changed(self, row, _param=None) -> None:
-        sel = row.get_selected()
-        if sel == Gtk.INVALID_LIST_POSITION:
-            return
-        state = PREVIEW_STATES[min(sel, len(PREVIEW_STATES) - 1)]
-        try:
-            self.preview_state_label.set_text(
-                f"Selected state: {PREVIEW_STATE_LABELS[min(sel, 2)]} — "
-                f"playing this variant's {state} visual")
-        except Exception:
-            pass
-
-    def _selected_preview_state(self) -> str:
-        try:
-            sel = self.cb_preview_state.get_selected()
-        except Exception:
-            return "scanning"
-        if sel == Gtk.INVALID_LIST_POSITION:
-            return "scanning"
-        return PREVIEW_STATES[min(sel, len(PREVIEW_STATES) - 1)]
-
-    def _preview_selected_state(self, _b=None) -> None:
-        """Play the selected state's visual for the active variant.
-
-        Daemon-independent: the plan comes from local files only, so
-        scanning/recognized/denied all preview with the service
-        stopped. Never authenticates, never touches PAM."""
-        state = self._selected_preview_state()
-        active = self._openings.get("active") or "iphone"
-        plan = preview_plan_for_state(active, state, self._openings)
-        if plan["kind"] == "none":
-            self.toast(plan["body"])
-            return
-        self._play_preview_plan(plan, active)
-
-    def _preview_denied(self, _b=None) -> None:
-        """Play the denied/failure visual for the active animation.
-
-        Daemon-independent (see _preview_selected_state)."""
-        active = (self._openings.get("active") or "iphone")
-        plan = preview_plan_for_state(active, "denied", self._openings)
-        if plan["kind"] == "none":
-            self.toast(plan["body"])
-            return
-        self._play_preview_plan(plan, active)
-
-    def _play_preview_plan(self, plan: dict, active: str) -> None:
-        """Render one daemon-free preview plan with the existing
-        renderers: Gtk.Video for clips, Cairo DrawingArea otherwise.
-        One tick at a time, removed on dialog close."""
-        s = openings.spec(self._openings, active) or {}
-        dlg = Adw.AlertDialog(heading=plan.get("heading") or "Animation",
-                              body=plan.get("body") or "",
-                              extra_child=self._preview_plan_widget(
-                                  plan, active, s))
-        dlg.add_response("close", "Close")
-        tick_id = {"id": 0}
-        widget = dlg.get_extra_child()
-        preview = getattr(widget, "_preview_area", None)
-        if plan.get("kind") != "video" and preview is not None:
-            def _tick():
-                try:
-                    preview.queue_draw()
-                except Exception:
-                    return False
-                return True
-
-            tick_id["id"] = GLib.timeout_add(33, _tick)
-        self.preview_area.queue_draw()
-
-        def _done(_d, _r):
-            try:
-                if tick_id["id"]:
-                    GLib.source_remove(tick_id["id"])
-            except Exception:
-                pass
-            tick_id["id"] = 0
-            dlg.close()
-
-        dlg.connect("response", _done)
-        dlg.present(self)
-
-    def _preview_plan_widget(self, plan: dict, active: str,
-                             spec: dict) -> Gtk.Widget:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                      width_request=320, height_request=360)
-        box.set_valign(Gtk.Align.CENTER)
-        box.set_halign(Gtk.Align.CENTER)
-        if plan.get("kind") == "video" and plan.get("asset"):
-            video = Gtk.Video.new_for_filename(plan["asset"])
-            try:
-                video.set_autoplay(True)
-                video.set_loop(True)
-            except Exception:
-                pass
-            # 432x432 sources letterbox in 280x200: aspect preserved,
-            # no stretch/crop of the lock-screen composition.
-            video.set_size_request(280, 200)
-            box.append(video)
-        else:
-            preview = Gtk.DrawingArea(width_request=280, height_request=80)
-            preview.add_css_class("opening-preview")
-            start = GLib.get_monotonic_time()
-
-            def draw(area, cr, w, h, _data):
-                now_ms = (GLib.get_monotonic_time() - start) / 1000
-                period = 1600 if active == "iphone" else max(
-                    int(spec.get("fade_ms") or 420) + 700, 900)
-                self._draw_opening_preview_at(cr, w, h, now_ms % period)
-            preview.set_draw_func(draw, None)
-            box.append(preview)
-            box._preview_area = preview
-        label = Gtk.Label(label=spec.get("description") or "")
-        label.add_css_class("dim-label")
-        label.set_wrap(True)
-        box.append(label)
-        return box
-
     def _refresh_openings(self) -> None:
         cfg = self._openings
         ids = openings.all_ids(cfg)
@@ -1627,14 +1328,6 @@ class Window(Adw.ApplicationWindow):
         finally:
             self._block_opening_signals(False)
             self._suspend_changes = False
-
-        s = openings.spec(cfg, active) or {}
-        desc = s.get("description") or ""
-        if s.get("kind") == "custom":
-            desc = f"{desc}  ·  {self._opening_summary(s)}" if desc \
-                else self._opening_summary(s)
-        self.preview_label.set_text(desc)
-        self.preview_area.queue_draw()
 
         self._clear(self.opening_group, self._opening_rows)
         active_id = cfg.get("active") or "iphone"
@@ -1709,78 +1402,6 @@ class Window(Adw.ApplicationWindow):
 
         GLib.idle_add(_later)
 
-    def _draw_opening_preview(self, area, cr, w, h, _data) -> None:
-        ms = getattr(area, "_preview_ms", None)
-        self._draw_opening_preview_at(cr, w, h, ms)
-
-    def _draw_opening_preview_at(self, cr, w, h, ms=None) -> None:
-        """Static frame (ms=None shows the settled end-state) or one
-        animated frame ms after the splash start. Mirrors the lock
-        screen: iphone = video halo hint (the mp4 plays in the inline
-        preview), logo = fade, glow = halo, none = empty pill."""
-        active = self._openings.get("active") or "iphone"
-        s = openings.spec(self._openings, active) or {}
-        bg = _rgba_tuple(s.get("bg") or "rgba(14, 18, 26, 0.82)")
-        accent = _rgba_tuple(s.get("accent") or "#a5d8ff")
-        cr.save()
-        cr.scale(w, h)
-        radius = 0.5
-        cr.move_to(radius, 0.0)
-        cr.line_to(1.0 - radius, 0.0)
-        cr.arc(1.0 - radius, 0.5, radius, -math.pi / 2, math.pi / 2)
-        cr.line_to(radius, 1.0)
-        cr.arc(radius, 0.5, radius, math.pi / 2, 3 * math.pi / 2)
-        cr.close_path()
-        cr.set_source_rgba(*bg)
-        cr.fill_preserve()
-        cr.set_line_width(0.02)
-        cr.set_source_rgba(*accent)
-        cr.stroke()
-        # Opacity/scale for this frame. Settles at 1 when ms is None.
-        if active == "none":
-            cr.restore()
-            return
-        if ms is None:
-            alpha, pop = 1.0, 1.0
-        elif active == "iphone":
-            enter = min(max(ms / 420.0, 0.0), 1.0)
-            e = 1 - pow(1 - enter, 3)
-            # outBack spring to match opening.js tick().
-            c1, c3 = 1.70158, 2.70158
-            x = enter - 1
-            back = 1 + c3 * x * x * x + c1 * x * x
-            pop = 0.72 + 0.28 * max(back, 0.0)
-            breathe = 0.0
-            if ms > 420:
-                t = min(max(ms / 900.0, 0.0), 1.0)
-                breathe = (math.sin((ms - 420) / 1000
-                                    * math.pi * 2 * 2) * 0.06
-                           * (1 - t * 0.4))
-            pop += breathe
-            alpha = max(e * (1 + min(breathe, 0.0) * 1.6), 0.0)
-        else:
-            fade = max(int(s.get("fade_ms") or 420), 1)
-            t = min(max(ms / fade, 0.0), 1.0)
-            alpha = 1 - pow(1 - t, 3)
-            pop = 0.85 + 0.15 * alpha if s.get("scale") else 1.0
-        cr.set_source_rgba(accent[0], accent[1], accent[2],
-                           accent[3] * max(min(alpha, 1.0), 0.0))
-        if s.get("ring"):
-            cr.arc(0.36, 0.5, 0.22 * pop, 0, 2 * math.pi)
-            cr.set_line_width(0.03)
-            cr.stroke()
-        elif active == "iphone":
-            # Halo + centre dot: the spring-pill look.
-            cr.arc(0.36, 0.5, 0.22 * pop, 0, 2 * math.pi)
-            cr.set_line_width(0.03)
-            cr.stroke()
-            cr.arc(0.36, 0.5, 0.10 * pop, 0, 2 * math.pi)
-            cr.fill()
-        else:
-            cr.arc(0.36, 0.5, 0.12 * pop, 0, 2 * math.pi)
-            cr.fill()
-        cr.restore()
-
     def on_opening_selected(self, *_a) -> None:
         if self._suspend_changes:
             return
@@ -1795,130 +1416,9 @@ class Window(Adw.ApplicationWindow):
                 # rebuild is deferred past this emission — doing it
                 # here re-enters notify::selected and wedges the app.
                 s = openings.spec(self._openings, vid) or {}
-                desc = s.get("description") or ""
-                self.preview_label.set_text(desc)
-                self.preview_area.queue_draw()
                 self._schedule_openings_refresh()
                 self.toast(f"Opening animation: {s.get('name') or vid} "
                            "(next lock)")
-
-    def _preview_opening_inline(self, _b=None) -> None:
-        """Play the selected opening animation in a dialog.
-
-        Daemon-independent scanning preview: the plan resolves the
-        active variant's own clip (the same unlock video the lock
-        screen flips through as frames) or the Cairo splash with lock-
-        screen timing, looping until closed."""
-        active = self._openings.get("active") or "iphone"
-        plan = preview_plan_for_state(active, "scanning", self._openings)
-        if plan["kind"] == "none":
-            self.toast(plan["body"])
-            return
-        self._play_preview_plan(plan, active)
-
-    def _daemon_error_dialog(self, friendly: str, technical: str) -> None:
-        """Friendly heading up front, raw GDBus text one tap away.
-
-        The technical line stays visible (collapsible, selectable for
-        pasting into a bug report) so mapping never masks a real,
-        different failure."""
-        details = Gtk.Label(label=technical or "(no further detail)",
-                            xalign=0, wrap=True, selectable=True)
-        details.add_css_class("dim-label")
-        details.add_css_class("cli-command")
-        expander = Gtk.Expander(label="Details")
-        expander.set_child(details)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                      width_request=420)
-        box.append(expander)
-        dlg = Adw.AlertDialog(heading=friendly,
-                              body="The animation clips above need no "
-                                   "service; only the live lock pill does.",
-                              extra_child=box)
-        dlg.add_response("close", "Close")
-        dlg.connect("response", lambda _d, _r: dlg.close())
-        dlg.present(self)
-
-    def _preview_success(self, _b=None) -> None:
-        """Daemon-gated: ask the daemon to play the full success
-        sequence on the real lock pill (ring, check, Verified,
-        Welcome, identity). The daemon only emits ScanState -- it can
-        never unlock anything or touch a decision path.
-
-        This is the one preview that genuinely needs the service; the
-        clip/Cairo previews above work without it."""
-
-        def run():
-            identity = ""
-            try:
-                for name, enabled, _model in self.daemon.list_identities():
-                    if enabled:
-                        identity = name
-                        break
-                self.daemon.preview_animation(identity)
-                return None
-            except Exception as e:
-                return split_daemon_error(e)
-
-        def then(res):
-            if res is None:
-                self.toast("Success animation previewing now")
-            else:
-                friendly, technical = res
-                if friendly == SERVICE_DOWN_FRIENDLY:
-                    self._daemon_error_dialog(friendly, technical)
-                else:
-                    self.toast(friendly)
-
-        self._thread(run, then)
-
-    def _preview_video_pill(self, _b=None) -> None:
-        """Launch linux-anim/test_anim.py as a detached preview window.
-
-        Standalone subprocess on purpose: the harness owns its own
-        Gtk.Application + LayerShell window, so a crash or missing
-        codec can never take the settings app down with it.
-        Checks the harness AND its mp4/png assets first so a missing
-        install shows a real reason instead of a silent nothing.
-        """
-        harness = _find_video_pill_harness()
-        if not harness:
-            self.toast("Video-pill harness not found (linux-anim/)")
-            logging.getLogger("faceid_app").warning(
-                "video pill preview: harness missing")
-            return
-        base = os.path.dirname(os.path.normpath(harness))
-        asset_dir = os.path.join(base, "glance_anim", "assets")
-        want = ("unlockanimation.mp4", "unsuccessfulunlockanimation.mp4",
-                "unlockstatic.png")
-        missing = [f for f in want
-                   if not os.path.isfile(os.path.join(asset_dir, f))]
-        if missing:
-            self.toast(f"Video assets missing: {', '.join(missing)}")
-            logging.getLogger("faceid_app").warning(
-                "video pill preview: missing %s in %s", missing, asset_dir)
-            return
-
-        def run():
-            import subprocess as _sp
-            try:
-                _sp.Popen(
-                    [sys.executable, harness],
-                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                    start_new_session=True)
-                return None
-            except Exception as e:
-                return str(e)
-
-        def then(res):
-            if res is None:
-                self.toast("Video-pill preview opening…")
-            else:
-                self.toast("Could not launch preview")
-                logging.getLogger("faceid_app").warning(
-                    "video pill preview failed: %s", res)
-
-        self._thread(run, then)
 
     def _thread(self, fn, then) -> None:
         """Run blocking work off the UI thread, then apply on the main one."""

@@ -5,8 +5,7 @@ Covers Phase 5-6 + Phase 2 state model + preview-startup fix:
 - GitHub link constants + open_url abstraction (mocked launcher)
 - GitHub icon resolves to the bundled mark (or theme fallback)
 - no promotional creator attribution in app sources
-- canonical scanning/recognized/denied mapping
-- daemon-free preview plans for all three states (no D-Bus touched)
+- no simulated preview surface (removed; live TestScan instead)
 - daemon-down message is actionable and never claims readiness
 - scan-face value/label separation (stored values never leak labels)
 - install_package refuses silent overwrite without overwrite=True
@@ -39,18 +38,29 @@ def test_github_link():
     assert len(seen) == 1
 
 
-def test_preview_state_mapping():
-    assert main.canonical_preview_state("waking") == "scanning"
-    assert main.canonical_preview_state("searching") == "scanning"
-    assert main.canonical_preview_state("verifying") == "scanning"
-    assert main.canonical_preview_state("matched") == "recognized"
-    assert main.canonical_preview_state("rejected") == "denied"
-    assert main.canonical_preview_state("timeout") == "denied"
-    assert main.canonical_preview_state("camera_error") == "denied"
-    # Unknown/empty never fabricates success
-    assert main.canonical_preview_state("bogus") == "scanning"
-    assert main.canonical_preview_state("") == "scanning"
-    assert set(main.PREVIEW_STATES) == {"scanning", "recognized", "denied"}
+def test_no_simulated_preview_surface():
+    # The canned scanning/recognized/denied preview layer was removed
+    # 2026-10-12: the Appearance page offers a real TestScan instead,
+    # so none of this machinery may come back unnoticed.
+    for name in ("PREVIEW_STATES", "PREVIEW_STATE_LABELS",
+                 "SCAN_STATE_TO_PREVIEW", "canonical_preview_state",
+                 "preview_plan_for_state", "cairo_preview_style"):
+        assert not hasattr(main, name), name
+    for meth in ("_preview_selected_state", "_preview_denied",
+                 "_preview_success", "_preview_video_pill",
+                 "_preview_opening_inline", "_play_preview_plan",
+                 "_close_preview", "_preview_plan_widget",
+                 "_draw_opening_preview", "_draw_opening_preview_at",
+                 "_on_preview_state_changed", "_selected_preview_state",
+                 "_find_video_pill_harness", "_daemon_error_dialog"):
+        assert not hasattr(main.Window, meth), meth
+
+
+def test_try_it_row_runs_real_test_scan():
+    src = inspect.getsource(main.Window._appearance_groups)
+    assert "Try it live" in src
+    assert "self.on_test" in src
+    assert "Preview" not in src
 
 
 def test_scan_face_values():
@@ -88,49 +98,6 @@ def test_install_refuses_overwrite(tmp_path, monkeypatch):
         assert "already exists" in str(e)
     # Explicit overwrite succeeds
     assert openings.install_package(str(pkg), overwrite=True) == "myanim"
-
-
-def _cfg_with_builtin():
-    cfg = openings.load()
-    cfg.setdefault("variants", {})
-    return cfg
-
-
-def test_preview_plans_need_no_daemon(monkeypatch):
-    """All three canned states resolve without touching D-Bus.
-
-    Fails if preview_plan_for_state ever calls the daemon: the proxy
-    constructor is replaced with a bomb.
-    """
-    import gi
-    gi.require_version("Gtk", "4.0")
-    from gi.repository import Gio
-
-    def _bomb(*a, **k):
-        raise AssertionError("preview must not touch D-Bus")
-
-    monkeypatch.setattr(Gio.DBusProxy, "new_for_bus_sync", _bomb)
-    cfg = _cfg_with_builtin()
-    for state in ("scanning", "recognized", "denied"):
-        plan = main.preview_plan_for_state("iphone", state, cfg)
-        assert plan["kind"] in ("video", "cairo")
-        assert plan["heading"] and plan["body"]
-    # Unknown state never fabricates success; unknown variant is honest
-    assert main.preview_plan_for_state(
-        "iphone", "bogus", cfg)["kind"] in ("video", "cairo")
-    none_plan = main.preview_plan_for_state("none", "scanning", cfg)
-    assert none_plan["kind"] == "none"
-
-
-def test_preview_plan_source_of_preview_plan():
-    src = inspect.getsource(main.Window._preview_selected_state)
-    assert "preview_plan_for_state" in src
-    # No daemon calls on this path: no bus method, no daemon attribute,
-    # no proxy construction (the word "daemon" may still appear in the
-    # docstring explaining independence).
-    assert "preview_animation" not in src
-    assert "self.daemon" not in src
-    assert "DBusProxy" not in src
 
 
 def test_service_unknown_maps_to_friendly():
