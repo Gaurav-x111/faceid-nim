@@ -53,6 +53,21 @@ unit_state() {
     echo "${active:-unknown} (${enabled:-unknown})"
 }
 
+dbus_name_state() {
+    # Owned means the daemon actually claimed its UI bus name. MISSING
+    # is a problem even when the unit reports active: the daemon keeps
+    # serving PAM without the bus (e.g. its policy file failed to load
+    # and the name claim was denied), and every app preview that needs
+    # the bus then fails with ServiceUnknown.
+    if ! command -v busctl >/dev/null 2>&1; then
+        echo "unknown (no busctl)"
+    elif busctl --system list 2>/dev/null | grep -q org.faceidnim.Daemon1; then
+        echo "owned"
+    else
+        echo "MISSING - daemon not on the bus (service unavailable)"
+    fi
+}
+
 config_flag() {
     # Reads a single top-level boolean/scalar out of the config without
     # pulling in a TOML parser.
@@ -88,6 +103,7 @@ case "$cmd" in
         echo "  faceid-nimd    : $(unit_state faceid-nimd.service)"
         echo "  faceid-vision  : $(unit_state faceid-vision.service)"
         echo "  fetch-models   : $(unit_state faceid-nim-fetch-models.service)"
+        echo "  D-Bus name org.faceidnim.Daemon1 : $(dbus_name_state)"
         echo
         echo "Sockets"
         # Audit 2026-10-06: the worker dir is 0770 root:faceid, so a
