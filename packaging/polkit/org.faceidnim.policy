@@ -65,7 +65,7 @@
   </action>
 
   <!-- A diagnostic scan still opens the camera, so it needs a polkit
-       decision -- but the Test button must stay smooth, so the local
+       decision — but the Test button must stay smooth, so the local
        active session is allowed without a password prompt. Remote and
        inactive sessions are denied: the camera must not open for
        someone not at this machine. (1B-2: TestScan used to run for any

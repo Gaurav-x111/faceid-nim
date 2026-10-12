@@ -222,6 +222,16 @@ CFG
         systemctl enable --now faceid-vision.service || true
     fi
 
+    # --- polkit -------------------------------------------------------
+    # polkitd reads action files at startup and does not reliably
+    # re-read them, so an action installed by an upgrade would
+    # otherwise stay unregistered and its authorization checks would
+    # fail on machines that should pass (seen live: org.faceidnim.test
+    # missing from pkaction while present on disk). Restarting polkitd
+    # is safe: it drops no sessions and changes no authentication
+    # configuration; try-restart leaves a stopped polkit alone.
+    systemctl try-restart polkit.service || true
+
     cat <<MSG
 
 faceid-nim installed. Face unlock is DISABLED.
