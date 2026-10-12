@@ -50,12 +50,20 @@ file = "minifasnet_v2.onnx"
 # 2 = replay attack) -- matches passive.py and the upstream test.py
 # convention (`label == 1` is Real). Scale 2.7 matches the worker crop.
 #
-# Pinned 2026-10-07 (was: unpinned, refused by resolve_optional()).
-# If the pin is ever removed again, the `antispoof_model` deny cue
-# stops firing and status reports the passive ML anti-spoof check as
-# unavailable -- do not advertise it as running while unpinned.
+# Pinned 2026-10-07, UNPINNED 2026-10-12: on-device measurement on a
+# real webcam (/dev/video1, MJPG 640x480) showed this export classifies
+# a live face as replay attack at p≈0.993, stable across 8 frames, all
+# crop scales 1.0x-3.5x, and BGR/RGB alike -- sensor-incompatible, not
+# borderline, so no threshold or label mapping rescues it. While pinned,
+# every unlock died as liveness_deny:antispoof_model with valid_frames
+# 1. Unpinned, resolve_optional() refuses it, fetch-models skips it,
+# and the worker degrades to the classical cues (moire/glare/blink/
+# planarity) while status reports the check as unavailable. Do NOT
+# re-pin without live-face AND spoof-sample evidence measured on the
+# target camera: a real face must score clearly live and a screen/print
+# attack clearly spoof under the same mapping.
 url = "https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx/resolve/main/minifasnet_v2.onnx"
-sha256 = "d7b3cd9ba8a7ceb13baa8c4720902e27ca3112eff52f926c08804af6b6eecc7b"
+sha256 = "UNPINNED-2026-10-12-live-face-scores-0.993-replay"
 license = "Apache-2.0"
 model_id = "minifasnet_v2"
 input_size = [80, 80]
