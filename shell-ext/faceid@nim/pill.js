@@ -264,6 +264,13 @@ class FaceIdPill extends St.Widget {
         this._welcomeStart = 0;
         this._progress = 0;
         this._pendingVerify = false;
+        // Video-only wait: when the iphone glance video is actually
+        // playing, the splash doubles as the waiting indicator -- the
+        // clip holds its last frame until the verdict instead of handing
+        // off to the rings scanner, so an iphone choice shows exactly one
+        // animation (video, then the result card). Any other variant, or
+        // the reduced-motion logo fallback, keeps the rings wait.
+        this._videoHold = false;
         this._reason = '';
         this._lastScanT = 0;
         this._rejectSweep = 0;
@@ -335,6 +342,9 @@ class FaceIdPill extends St.Widget {
         this._setLabel('Opening camera…');
         this._glyph.visible = false;
         this._opening.enter(this);
+        // Decided here, not per tick: enter() is what probes the frames
+        // and the reduced-motion switch, so videoPlaying() is final now.
+        this._videoHold = this._opening.videoPlaying() === true;
     }
 
     setProgress(p) {
@@ -342,11 +352,11 @@ class FaceIdPill extends St.Widget {
         this._show();
         if (this._state === 'success' || this._state === 'rejected')
             return;
-        if (this._state === 'opening') {
-            // The splash has a minimum play time (OpeningScene.duration,
-            // the fade the user picked). A fast scan must not cut it off
-            // after one frame: hold the verifying progress and let the
-            // tick loop perform the handoff on time.
+        if (this._state === 'opening' || this._state === 'holding') {
+            // The splash (or its held last frame) has a minimum play time
+            // (OpeningScene.duration, the fade the user picked). A fast
+            // scan must not cut it off after one frame: hold the verifying
+            // progress and let the tick loop perform the handoff on time.
             this._pendingVerify = true;
             return;
         }
@@ -460,6 +470,7 @@ class FaceIdPill extends St.Widget {
         this._welcomeStart = 0;
         this._progress = 0;
         this._pendingVerify = false;
+        this._videoHold = false;
         this._setClasses(null); // idle: clear ok/fail tint
         this._setLabel('');
         this._card.visible = false;
@@ -742,6 +753,16 @@ class FaceIdPill extends St.Widget {
             this._glyph.animate({ phase: 'rays', scanT: 0, t: 0,
                                   progress: 0, ramp: 0, failed: false });
             if (sinceMs >= this._opening.duration()) {
+                if (this._videoHold) {
+                    // Video-only wait: keep the held last frame on screen
+                    // and skip the rings scanner entirely. The verdict
+                    // (showMatched/showRejected) hands off to the result
+                    // card from here.
+                    this._setLabel(SCAN_TEXT);
+                    this._enter('holding');
+                    this._pendingVerify = false;
+                    break;
+                }
                 this._opening.handoff(this);
                 this._glyph.visible = true;
                 this._setLabel(SCAN_TEXT);
@@ -750,6 +771,15 @@ class FaceIdPill extends St.Widget {
                 this._enter(this._pendingVerify ? 'verifying' : 'scanning');
                 this._pendingVerify = false;
             }
+            break;
+        }
+
+        case 'holding': {
+            // The iphone clip's last frame stays up while the daemon
+            // decides; no rings, no second animation. tick() with a time
+            // past the clip length keeps painting the final frame.
+            this._welcomeTick();
+            this._opening.tick(this._opening.duration());
             break;
         }
 

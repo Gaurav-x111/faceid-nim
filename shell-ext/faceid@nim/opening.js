@@ -366,6 +366,13 @@ export class OpeningScene {
         return (this._id || '') === 'none';
     }
 
+    // True while the glance video frames are on screen (not the logo
+    // fallback): the pill uses this to decide whether the splash can
+    // double as the whole wait, skipping the rings scanner.
+    videoPlaying() {
+        return this._videoOn === true && this._video.visible === true;
+    }
+
     enter(pill) {
         if (this.isNone())
             return;
