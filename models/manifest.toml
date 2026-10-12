@@ -62,6 +62,15 @@ file = "minifasnet_v2.onnx"
 # re-pin without live-face AND spoof-sample evidence measured on the
 # target camera: a real face must score clearly live and a screen/print
 # attack clearly spoof under the same mapping.
+#
+# Hunt 2026-10-12 (all rejected, none pinned): MiniFASNet-V1SE export
+# scored 0.973 stable spoof; an independent V2 export scored 0.994 (same
+# weights, so the export was never the problem); facenox
+# best_model.onnx (Apache-2.0, 2-class Real/Spoof, 128 RGB) was erratic
+# frame to frame (diff -5.1..+6.3) and mostly spoof; MJPG vs uncompressed
+# YUYV changed nothing. Every tested CNN reads this webcam's live faces
+# as attacks, so ML anti-spoof stays unavailable until a model proves
+# itself on this sensor.
 url = "https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx/resolve/main/minifasnet_v2.onnx"
 sha256 = "UNPINNED-2026-10-12-live-face-scores-0.993-replay"
 license = "Apache-2.0"
