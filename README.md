@@ -10,6 +10,36 @@ Supports **RGB**, **IR**, and **hybrid (RGB + IR)** cameras.
 > stronger. Twins and siblings raise false accepts. Your password
 > always works.
 
+## Demo
+
+![sudo unlock: the iPhone pill plays once, holds, then Verified](docs/demo/demo.gif)
+
+A real `sudo` unlock: the iPhone video plays once on the
+Dynamic-Island pill, holds its last frame while the scan finishes,
+then resolves to ✓ Verified — one animation, no scanner rings after
+the video.
+
+| Identities | Security | Diagnostics |
+|---|---|---|
+| ![enrolled identity and Test-a-scan row](docs/demo/identities.png) | ![honest limitations](docs/demo/Security.png) | ![copyable commands](docs/demo/diagnostics.png) |
+
+### How the animation is reached (read before expecting it)
+
+Enrolling your face triggers **no** animation — it only stores a
+template. The animation lives in the **GNOME Shell extension**
+(`faceid@nim`) and plays on **every daemon scan**, whoever asked:
+GDM login, lock-screen unlock, `sudo`, polkit prompts, and the app's
+Try-it-live button. Each scan re-reads your choice (Opening +
+Scanner style) from `~/.config/faceid-nim/openings.json`, so app
+changes apply at the very next lock — no reload, no restart.
+
+One requirement: GNOME animations must be on. With them off, the
+iPhone video degrades to a plain logo pop (unlock still works):
+
+```sh
+gsettings set org.gnome.desktop.interface enable-animations true
+```
+
 ## What it is
 
 | Component | Language | Job |
@@ -41,16 +71,18 @@ fetch, and systemd units.
 voting: the worker measures room light per scan and picks the sensor
 automatically — dark rooms use IR, lit rooms use RGB. Liveness combines
 7 classical cues (glare, moire FFT, IR skin response, homography
-planarity, EAR blink, parallax, challenge-response) plus a passive
-MiniFASNet-V2 anti-spoof CNN (Apache-2.0 ONNX export, pinned by SHA-256
-in the manifest, loaded as one vote among several -- never as the
-authority). The pill lives in top chrome above the screen
+planarity, EAR blink, parallax, challenge-response). A passive ML
+anti-spoof vote exists in the design but ships **off**: no verified
+export passes on real hardware yet (measured 2026-10-12, see
+[ML anti-spoof](#ml-anti-spoof-model-minifasnet-v2-optional)), so the
+worker runs the classical cues and every surface says the ML check is
+unavailable. The pill lives in top chrome above the screen
 shield so the success animation survives the unlock.
 
 **Threat model:** Defends against printed photos, phone-screen replay,
-and video replay (classical liveness cues + IR + MiniFASNet-V2 passive
-CNN as one vote; treat video-replay defense as best-effort -- the CNN
-loses accuracy on cameras and lighting it was not trained on). Does NOT defend against
+and video replay (classical liveness cues + IR; a learned CNN vote
+joins only when a model proves itself on the target camera — treat
+video-replay defense as best-effort). Does NOT defend against
 masked attackers, twins, or adversarial perturbations. RGB-only mode is
 fundamentally spoofable — IR is what makes it credible. Any failure
 (camera, GPU, emitter, model) falls back to password; the system never
@@ -61,10 +93,10 @@ fails open.
 1. **Spectrum-gated enrollment** — capturing and matching faces under
    both RGB and IR, then voting per-spectrum so a dark room doesn't
    force a re-enrollment.
-2. **The liveness stack** — 7 classical CV cues plus the MiniFASNet-V2
-   passive CNN vote, all running
-   in real-time on CPU with no false rejects
-   on legitimate users.
+2. **The liveness stack** — 7 classical CV cues running in real-time
+   on CPU with no false rejects on legitimate users, plus a
+   deliberately empty slot for an ML vote that only ships when a
+   model earns it with hardware evidence.
 3. **The PAM/daemon security boundary** — the worker is unprivileged
    and never sees templates; the daemon never sees frames; the PAM
    module does no AI. Password always works (`sufficient` flag).
@@ -105,7 +137,7 @@ faceid-nim installed. Face unlock is DISABLED.
 
   models    : ready
   landmarks : blink / 3D / attention checks active
-  anti-spoof: active (MiniFASNet-V2 passive CNN, one vote among several)
+  anti-spoof: unavailable (no verified ML model for this hardware — classical cues active)
   device   : CPU only
   camera   : /dev/video0 present (the app picks RGB/IR)
 ```
@@ -236,7 +268,7 @@ To add yours to the catalogue, PR your `.faceopen` into
 `openings/packages/` plus one entry in `openings/catalog.json`
 (see `openings/README.md`).
 
-## App navigation, preview states & GitHub
+## App navigation & GitHub
 
 Sidebar: **Overview, Identities, Cameras, Security, Settings,
 Diagnostics**, plus a separated **GitHub ↗** link at the bottom
@@ -246,24 +278,23 @@ browser via `Gio.AppInfo.launch_default_for_uri` — no embedded
 browser, no startup network request.
 
 Appearance & Animation lives under **Settings** (not a top-level
-page). The preview selector uses the canonical presentation states
-`scanning` / `recognized` / `denied`, resolved from the **selected**
-variant's own assets (success clip, failure clip or Cairo fallback) —
-never another variant's hard-coded clip, never a live auth signal.
-All three play with the daemon stopped; only "Play on the lock pill"
-needs `faceid-nimd` and says so when it is absent.
-Production `ScanState` maps `waking|searching|verifying → scanning`,
-`matched → recognized`, `rejected|timeout|camera_error → denied`;
-unknown signals fall back to scanning. Preview controls cannot invoke
-privileged auth actions; the lock-screen pill is listen-only (no bus
-method calls). Full pipeline diagrams: `docs/animation-pipeline.md`.
+page): Animations toggle, Active animation (`iphone` video pill,
+`logo`, `glow`, `none`), Scanner style (`iPhone`, `Smile`, `Orbit`,
+`Classic`), a **Try it live** row that runs a real daemon TestScan
+through your camera (the lock pill animates exactly as on unlock;
+Recognised / Not recognised, nothing unlocked), then Make your own /
+Get animations / Your animations. The old canned scanning/recognized/
+denied previews were removed — they drifted from what the pill
+actually plays. No control here can invoke privileged auth actions;
+the lock-screen pill is listen-only (no bus method calls). Full
+pipeline diagrams: `WORKING.md`.
 
 Video: 432×432 H.264 60 fps source clips in
 `linux-anim/glance_anim/assets/`; the lock screen plays 216×216 PNG
 frames (`shell-ext/faceid@nim/glance-frames/`, success clip only —
-denied is glyph-only by design); the app letterboxes clips in a
-280×200 `Gtk.Video` frame (aspect preserved). No WebKit/HTML preview
-exists by design — Cairo + `Gtk.Video` is the renderer.
+denied is glyph-only by design). The app itself plays no clips —
+verification is the Try-it-live real scan. No WebKit/HTML exists by
+design.
 
 **Update checking is deferred, not implemented.** The GitHub link does
 not check versions, and no background request ever runs. To check
@@ -290,10 +321,12 @@ app never silently burns a timeout on empty IR.
 
 ## ML anti-spoof model (MiniFASNet-V2, optional)
 
-Most users can skip this section — the model installs and activates
-itself, and face unlock works with or without it. It exists for those
-who want to know what the extra liveness vote does, and for those who
-would rather turn it off.
+Most users can skip this section — face unlock works without the
+model, on the classical cues alone, and that is the shipping state:
+the entry is currently **unpinned**, so fresh installs skip it and
+`status` reports `ML anti-spoof: unavailable`. It exists for those
+who want to know what the extra liveness vote would do, and what it
+would take to turn it on.
 
 **What it is.** A passive anti-spoof CNN: given one 80×80 face crop it
 scores whether the face is live or a presentation attack (printed photo
@@ -326,12 +359,19 @@ combination; the CNN is a smaller gain there.
 * Cost: one extra CPU ONNX session per scan (~1.7 MB on disk,
   milliseconds on CPU). No GPU, network, or account needed.
 
-**Setup (nothing to do on a fresh install).** The `.deb` postinst
-fetches and checksum-verifies it like every other model. To confirm on
-an existing install:
+**Setup (only if a model earns a pin).** While unpinned, postinst and
+`fetch-models` skip the entry on every install and boot:
 
 ```sh
-sudo cp models/manifest.toml /usr/share/faceid-nim/models/manifest.toml  # only if installed before 1.1.1
+sudo faceid-nim fetch-models     # prints: antispoof unpinned, not fetching
+sudo faceid-nim status           # expect: antispoof unpinned / ML anti-spoof unavailable
+```
+
+To activate a candidate export, pin its SHA-256 in
+`models/manifest.toml`, reinstall (or copy the manifest to
+`/usr/share/faceid-nim/models/`), then:
+
+```sh
 sudo faceid-nim fetch-models     # downloads minifasnet_v2.onnx, verifies SHA-256
 sudo systemctl restart faceid-vision.service
 sudo faceid-nim status           # expect: antispoof: ok / ML anti-spoof: active
@@ -410,8 +450,8 @@ exclude_users = []        # users who always fall through to password
 
 Over D-Bus every field is all-or-nothing — an omitted `enabled`
 disables the daemon. The app sends the full set. Changing settings,
-enrolling, deleting data, or enabling PAM requires polkit; opening a
-preview or running Test Scan does not write anything and therefore does
+enrolling, deleting data, or enabling PAM requires polkit; running Test Scan
+does not write anything and therefore does
 not require a password prompt.
 
 ## Build from source / make the `.deb`
@@ -477,19 +517,21 @@ numbers, never "99% accurate".
   own lock screen.
 - **Adding your own:** Settings → Appearance & Animation → Create (format above); swapping
   the iPhone video itself takes the mp4 *plus* re-extracted
-  lock-screen frames — steps and sizes in `docs/animations.md`.
+   lock-screen frames — steps and sizes are in `WORKING.md`.
 - **How many faces?** No fixed identity cap (15 templates each). With
   several enrolled people in frame at once, any one matching unlocks —
   and every identity under your account opens *your* account, so only
   enrol people you trust with it.
 - **Photo or video held up to the camera?** No. Print dies on
   planarity/parallax + blink; screens add moiré + glare; video adds
-  challenge-response at heavy; IR checks live skin; the ML anti-spoof
-  model adds a learned verdict when present — and any single cue
+  challenge-response at heavy; IR checks live skin; a learned ML
+  verdict would join as one more vote only once a model proves
+  itself on the target camera (none has yet — see the ML anti-spoof
+  section) — and any single cue
   vetoes the unlock whatever the match. Honestly: resistance is
   unmeasured with real attack samples here, so run
   `eval/apcer_bpcer.py` with your own clips (it refuses small-n
-  claims) before quoting numbers. Full detail: `docs/animations.md`.
+   claims) before quoting numbers. Full detail: `WORKING.md`.
 
 ## Recovery
 
