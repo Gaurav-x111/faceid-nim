@@ -188,3 +188,24 @@ def test_no_creator_attribution_in_sources():
     # TTS fallback sample name must be neutral, never a personal name
     src = pathlib.Path(main.__file__).read_text()
     assert 'sample = "Zang"' not in src
+
+
+def test_overview_has_no_next_step():
+    """The dead 'Next step' block is gone: its button did nothing."""
+    import pathlib
+    src = pathlib.Path(main.__file__).read_text()
+    assert "Next step" not in src
+    assert "overview_next" not in src
+    assert "_on_overview_next" not in src
+
+
+def test_sidebar_footer_is_github_only():
+    """No faceid-nim footer text under the sidebar; GitHub row keeps
+    its label, tooltip and browser wiring."""
+    import pathlib
+    src = pathlib.Path(main.__file__).read_text()
+    assert 'faceid-nim{v}' not in src
+    assert "GitHub ↗" in src
+    assert "GITHUB_TOOLTIP" in src
+    body = src[src.index("def _on_github_nav"):]
+    assert "open_url(GITHUB_URL)" in body

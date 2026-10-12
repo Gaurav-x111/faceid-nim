@@ -562,14 +562,8 @@ class Window(Adw.ApplicationWindow):
         grow.set_child(gitem)
         github_row.append(grow)
         github_row.connect("row-selected", self._on_github_nav)
+        github_row.set_margin_bottom(10)
         box.append(github_row)
-
-        v = GLib.getenv("VERSION") or ""
-        foot = Gtk.Label(label=f"faceid-nim{v}",
-                         halign=Gtk.Align.CENTER,
-                         margin_top=2, margin_bottom=10)
-        foot.add_css_class("dim-label")
-        box.append(foot)
         return box
 
     def _on_nav(self, listbox, row) -> None:
@@ -635,18 +629,6 @@ class Window(Adw.ApplicationWindow):
         self.overview_sec_row.add_suffix(go_sec)
         self.overview_summary.add(self.overview_sec_row)
         page.add(self.overview_summary)
-
-        next_group = Adw.PreferencesGroup(title="Next step")
-        self.overview_next_row = Adw.ActionRow(
-            title="Add an identity",
-            subtitle="Nine poses, about 20 seconds")
-        self.overview_next_btn = Gtk.Button(label="Enroll",
-                                            valign=Gtk.Align.CENTER)
-        self.overview_next_btn.add_css_class("suggested-action")
-        self.overview_next_btn.connect("clicked", self._on_overview_next)
-        self.overview_next_row.add_suffix(self.overview_next_btn)
-        next_group.add(self.overview_next_row)
-        page.add(next_group)
         return page
 
     def _identities_page(self) -> Gtk.Widget:
@@ -1223,20 +1205,6 @@ class Window(Adw.ApplicationWindow):
         self._refresh_openings()
         return GLib.SOURCE_REMOVE
 
-    def _on_overview_next(self, _b=None) -> None:
-        """Contextual Overview action: enroll when empty, otherwise open
-        Appearance & Animation under Settings."""
-        try:
-            n = len(self._id_rows)
-            has_identity = n > 0 and not (
-                n == 1 and isinstance(self._id_rows[0], Adw.ActionRow))
-        except Exception:
-            has_identity = False
-        if has_identity:
-            self._go("settings")
-        else:
-            self.on_enroll()
-
     def _update_overview(self, ids: list, diag: dict,
                          errors: list[str]) -> None:
         """Mirror hero-dot truth in the Overview summaries (never a toggle
@@ -1259,16 +1227,6 @@ class Window(Adw.ApplicationWindow):
                 live = self._liveness_health(diag)
                 sec = live["summary"] if not live["ok"] else "Ready"
             self.overview_sec_row.set_subtitle(sec)
-            if not ids:
-                self.overview_next_row.set_title("Add an identity")
-                self.overview_next_row.set_subtitle(
-                    "Nine poses, about 20 seconds")
-                self.overview_next_btn.set_label("Enroll")
-            else:
-                self.overview_next_row.set_title("Review your animations")
-                self.overview_next_row.set_subtitle(
-                    "Settings → Appearance & Animation")
-                self.overview_next_btn.set_label("Open")
         except Exception:
             pass
 
