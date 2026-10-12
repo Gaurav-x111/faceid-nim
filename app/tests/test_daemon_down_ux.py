@@ -141,3 +141,22 @@ def test_full_diag_still_on_diagnostics_page():
     window's Diagnostics page, not vanish entirely."""
     body = _method_body(_src(MAIN_PY), "_apply_refresh")
     assert "for k, v in diag.items()" in body
+
+
+def test_rules_helper_install_lines_have_tabs():
+    """debian/rules recipes MUST start with a tab; a missing one is a
+    'missing separator' error at build time (regression: the
+    restart-if-active line shipped without one)."""
+    import subprocess
+    out = subprocess.run(["make", "-n", "-f", "debian/rules", "clean"],
+                         capture_output=True, text=True,
+                         cwd=str(REPO), timeout=120)
+    assert out.returncode == 0, out.stderr
+    src = _src(REPO / "debian" / "rules")
+    body = src[src.index("override_dh_auto_install"):]
+    body = body[:body.index("\noverride_dh_gencontrol")]
+    for line in body.splitlines():
+        if "install -m" in line or line.startswith("install "):
+            assert line.startswith("\t"), f"missing tab: {line!r}"
+    # The helper really is installed by the rule.
+    assert "restart-if-active" in body

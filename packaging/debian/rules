@@ -174,7 +174,7 @@ override_dh_auto_install:
 	install -m 0755 packaging/scripts/check-updates $(DESTDIR)$(LIBEXEC)/
 	install -m 0755 packaging/scripts/ir-emitter $(DESTDIR)$(LIBEXEC)/
 	install -m 0755 packaging/scripts/gpu-devices $(DESTDIR)$(LIBEXEC)/
-install -m 0755 packaging/scripts/restart-if-active $(DESTDIR)$(LIBEXEC)/
+	install -m 0755 packaging/scripts/restart-if-active $(DESTDIR)$(LIBEXEC)/
 	install -m 0755 packaging/scripts/diagnose.sh $(DESTDIR)$(LIBEXEC)/faceid-nim-diagnose
 	install -d $(DESTDIR)/usr/bin
 	install -m 0755 bin/faceid-nim $(DESTDIR)/usr/bin/faceid-nim
