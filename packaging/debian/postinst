@@ -208,8 +208,19 @@ CFG
     # --- services -----------------------------------------------------
     systemctl daemon-reload || true
     systemctl enable --now faceid-nim-fetch-models.service || true
-    systemctl enable --now faceid-nimd.service || true
-    systemctl enable --now faceid-vision.service || true
+    if [ -n "${2:-}" ]; then
+        # Upgrade ($2 is the previously installed version):
+        # dh_installsystemd runs with --no-stop-on-upgrade, so the OLD
+        # daemon may still be serving requests. Restart what was
+        # already running so the new binary takes over; stopped units
+        # stay stopped. This never enables face unlock.
+        [ -x "$LIBEXEC/restart-if-active" ] \
+            && "$LIBEXEC/restart-if-active" \
+                faceid-nimd.service faceid-vision.service || true
+    else
+        systemctl enable --now faceid-nimd.service || true
+        systemctl enable --now faceid-vision.service || true
+    fi
 
     cat <<MSG
 
