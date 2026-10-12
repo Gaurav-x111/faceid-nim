@@ -54,7 +54,9 @@ def test_preview_state_mapping():
 
 
 def test_scan_face_values():
-    assert main.SCAN_FACE_VALUES == ["apple", "arena", "classic"]
+    assert main.SCAN_FACE_VALUES == ["iphone", "apple", "arena", "classic"]
+    assert main.SCAN_FACE_LABELS == ["iPhone (default)", "Smile", "Orbit", "Classic"]
+    assert len(main.SCAN_FACE_LABELS) == len(main.SCAN_FACE_VALUES)
     # Labels are UI-only; stored values are lowercase ids
     for v in main.SCAN_FACE_VALUES:
         assert v == v.lower()

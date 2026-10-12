@@ -87,11 +87,13 @@ def glance_asset(name: str) -> str:
 
 EASINGS = ["outCubic", "outBack", "outExpo"]
 
-# Which scan-face the unlock pill draws. "apple" is the default
-# smile-face scanner (thin track + progress arc + smiling face);
-# "arena" is the premium halo/crest scanner; "classic" is the original.
-SCAN_FACES = ["apple", "arena", "classic"]
-DEFAULT_SCAN_FACE = "apple"
+# Which scan-face the unlock pill draws. "iphone" is the default
+# iPhone-style scanner (thin track + progress arc + smiling face, the
+# same language as the iphone opening video); "apple" is its historical
+# name and renders identically; "arena" is the premium halo/crest
+# scanner; "classic" is the original.
+SCAN_FACES = ["iphone", "apple", "arena", "classic"]
+DEFAULT_SCAN_FACE = "iphone"
 
 BUILTIN = {
     "iphone": {
@@ -169,7 +171,7 @@ def load() -> dict:
     """Load openings.json, migrating legacy values.
 
     Migrations (glance→iphone, unknown→iphone default, bad
-    scan_face→apple) are written back when they change anything, so a
+    scan_face→iphone) are written back when they change anything, so a
     stale file cannot keep shadowing the in-memory state forever: the
     app shows one thing while the lock screen (which reads the file)
     plays another.

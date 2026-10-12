@@ -124,7 +124,7 @@ const BUILTIN = {
 };
 
 function _readConfig() {
-    const fallback = { active: 'iphone', variants: {}, scan_face: 'apple' };
+    const fallback = { active: 'iphone', variants: {}, scan_face: 'iphone' };
     try {
         const file = Gio.File.new_for_path(CONFIG_PATH);
         if (!file.query_exists(null))
@@ -135,12 +135,12 @@ function _readConfig() {
         const data = JSON.parse(new TextDecoder().decode(bytes));
         if (!data || typeof data !== 'object')
             return fallback;
-        const face = String(data.scan_face || 'apple');
+        const face = String(data.scan_face || 'iphone');
         return {
             active: String(data.active || 'iphone'),
             variants: data.variants && typeof data.variants === 'object'
                 ? data.variants : {},
-            scan_face: (face === 'classic' || face === 'arena') ? face : 'apple',
+            scan_face: (face === 'iphone' || face === 'apple' || face === 'classic' || face === 'arena') ? face : 'iphone',
         };
     } catch (e) {
         logError(e, 'faceid@nim: opening config');
@@ -330,7 +330,7 @@ export class OpeningScene {
         this._spec = _specFor(cfg, id);
         this._fadeMs = Math.max(1, this._spec.fade_ms);
         this._id = id;
-        this._scanFace = cfg.scan_face || 'apple';
+        this._scanFace = cfg.scan_face || 'iphone';
         return this;
     }
 
@@ -338,9 +338,10 @@ export class OpeningScene {
         return this._id || 'iphone';
     }
 
-    // 'apple' (default iPhone-like) | 'arena' (premium) | 'classic'.
+    // 'iphone' (default iPhone-like) | 'apple' (same face, historic
+    // name) | 'arena' (premium) | 'classic'.
     scanFace() {
-        return this._scanFace || 'apple';
+        return this._scanFace || 'iphone';
     }
 
     name() {

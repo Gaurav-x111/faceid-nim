@@ -122,10 +122,11 @@ SCAN_STATE_TO_PREVIEW = {
 }
 
 # Human-readable scan-face labels <-> stored values. The stored values
-# (apple/arena/classic) are persisted in openings.json and read by the
-# shell extension; the UI labels must never leak into storage or logs.
-SCAN_FACE_VALUES = ["apple", "arena", "classic"]
-SCAN_FACE_LABELS = ["Smile (default)", "Orbit", "Classic"]
+# (iphone/apple/arena/classic) are persisted in openings.json and read
+# by the shell extension; the UI labels must never leak into storage or
+# logs. "iphone" and "apple" render the same iPhone-style face.
+SCAN_FACE_VALUES = ["iphone", "apple", "arena", "classic"]
+SCAN_FACE_LABELS = ["iPhone (default)", "Smile", "Orbit", "Classic"]
 
 
 def canonical_preview_state(scan_state: str) -> str:

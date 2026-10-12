@@ -199,12 +199,13 @@ stored per user in `~/.config/faceid-nim/openings.json`:
 {
   "active": "iphone",      // which opening animation plays at scan start
   "variants": {},          // user specs indexed by id
-  "scan_face": "apple"     // scanner style: apple | arena | classic
+  "scan_face": "iphone"    // scanner style: iphone | apple (same) | arena | classic
 }
 ```
 
-**Scanner style** (`Settings → Appearance & Animation → Scanner`): shown as **Smile
-(default)** = thin track + progress arc + smiling face,
+**Scanner style** (`Settings → Appearance & Animation → Scanner`): shown as **iPhone
+(default)** = thin track + progress arc + smiling face (same language as the
+iphone opening video), **Smile** = identical face under its historic name,
 **Orbit** = halo/crest/comet scanner, **Classic** = original ring.
 
 **The opening** (`Settings → Appearance & Animation → Active animation`): built-ins `iphone`
