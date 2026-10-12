@@ -64,3 +64,17 @@ if m.accepted && liveness_ok { /* unlock */ }
 The ordering matters less than the independence. `vote()` never sees a
 liveness cue and the liveness fusion never sees a similarity score, so
 neither can be talked into excusing the other.
+
+## App navigation & preview (2026-10)
+
+Sidebar order: Overview, Identities, Cameras, Security, Settings,
+Diagnostics, plus a separated `GitHub ↗` link (system browser, no
+startup network, `open_url()` in `app/faceid_app/main.py` — no update
+checker; deferred by design). Animation customization lives under
+Settings → Appearance & Animation (the former top-level Opening page
+was migrated; `openings.json` ids/values unchanged).
+
+Preview is Cairo + `Gtk.Video`, not WebKit/HTML: canonical states
+`scanning|recognized|denied` map from `ScanState` via
+`SCAN_STATE_TO_PREVIEW` and resolve the **selected** variant's own
+assets. Full pipeline: `docs/animation-pipeline.md`.

@@ -14,13 +14,16 @@ Adwaita has no widget for: the hero card, the status dots and the
 rounded camera preview frame.
 
 Pages:
-  Overview    -- hero on/off card + enrolled faces + enroll / test
-  Settings    -- strictness with a live explanation banner, camera
-                 source, scan timeout, attention
-  Opening     -- pick the lock-screen opening animation, make your own,
-                 install community packages, share yours on GitHub
-  Security    -- the honest limitations, plus delete-everything
-  Diagnostics -- daemon state + copyable CLI commands
+   Overview    -- hero on/off card + status summaries + links out
+   Identities  -- enrolled faces + enroll / test
+   Cameras     -- detected cameras + rescan
+   Security    -- the honest limitations, plus delete-everything
+   Settings    -- strictness, camera source, scan timeout, attention,
+                  plus Appearance & Animation (selection + preview)
+   Diagnostics -- daemon state + copyable CLI commands
+   (The former top-level "Opening" page was migrated into
+   Settings → Appearance & Animation; persisted openings.json values,
+   animation ids and the glance→iphone migration are unchanged.)
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ import logging.handlers
 import math
 import os
 import re
+import shlex
 import sys
 from threading import Thread
 
@@ -44,6 +48,177 @@ from .dbus_client import Daemon, DaemonError  # noqa: E402
 from .onboarding import OnboardingWindow  # noqa: E402
 
 APP_ID = "org.faceidnim.App"
+
+GITHUB_URL = "https://github.com/Gaurav-x111/faceid-nim"
+GITHUB_TOOLTIP = "View source code, releases, and development updates."
+GITHUB_ICON_FILE = "github-symbolic.svg"
+GITHUB_ICON_FALLBACK = "web-browser-symbolic"
+
+
+def github_icon_path() -> str:
+    """Local bundled GitHub mark, or '' when not found.
+
+    Primary location is beside this module
+    (Path(__file__).with_name(...)); the repo data dir and the
+    installed layout (/usr/share/faceid-nim/..., which ships the whole
+    faceid_app directory) are fallbacks. File-existence only — no
+    network, no theme probing (unreliable without a display)."""
+    from pathlib import Path
+
+    here = Path(__file__).with_name(GITHUB_ICON_FILE)
+    candidates = [
+        str(here),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "data", GITHUB_ICON_FILE),
+        "/usr/share/faceid-nim/app/faceid_app/" + GITHUB_ICON_FILE,
+    ]
+    for c in candidates:
+        try:
+            if c and os.path.isfile(c):
+                return os.path.normpath(c)
+        except Exception:
+            continue
+    return ""
+
+
+def github_image(size: int = 16) -> Gtk.Image:
+    """Sidebar GitHub mark: bundled SVG when shipped, otherwise the
+    system web-browser icon. Text label + tooltip are always kept,
+    so meaning never depends on the artwork alone. Note: SVG support
+    varies with how GTK loads images — if new_from_file() ever fails
+    to render, this falls back to the theme icon instead of showing
+    nothing."""
+    path = github_icon_path()
+    try:
+        if path:
+            img = Gtk.Image.new_from_file(path)
+            img.set_pixel_size(size)
+            return img
+    except Exception:
+        pass
+    return Gtk.Image(icon_name=GITHUB_ICON_FALLBACK, pixel_size=size)
+
+# Canonical preview states (Phase 2 state model). These are presentation
+# only: they select which visual/asset the preview shows and must never
+# drive an authentication decision. Production ScanState values map onto
+# them via SCAN_STATE_TO_PREVIEW below.
+PREVIEW_STATES = ("scanning", "recognized", "denied")
+PREVIEW_STATE_LABELS = ["Scanning", "Recognized", "Denied"]
+
+# Authoritative daemon/shell ScanState -> canonical preview state.
+# waking/searching/verifying are all "in progress"; matched is terminal
+# success; rejected/timeout/camera_error are terminal failure presentations
+# (timeout/camera_error surface their own reason text but share the denied
+# visual). Unknown/empty signals fall back to scanning, never to a
+# fabricated success.
+SCAN_STATE_TO_PREVIEW = {
+    "waking": "scanning",
+    "searching": "scanning",
+    "verifying": "scanning",
+    "matched": "recognized",
+    "rejected": "denied",
+    "timeout": "denied",
+    "camera_error": "denied",
+}
+
+# Human-readable scan-face labels <-> stored values. The stored values
+# (apple/arena/classic) are persisted in openings.json and read by the
+# shell extension; the UI labels must never leak into storage or logs.
+SCAN_FACE_VALUES = ["apple", "arena", "classic"]
+SCAN_FACE_LABELS = ["Smile (default)", "Orbit", "Classic"]
+
+
+def canonical_preview_state(scan_state: str) -> str:
+    """Map a daemon ScanState signal to a canonical preview state."""
+    return SCAN_STATE_TO_PREVIEW.get(str(scan_state or ""), "scanning")
+
+
+def preview_plan_for_state(active: str, state: str, cfg: dict | None = None) -> dict:
+    """Daemon-free preview plan for Settings → Appearance & Animation.
+
+    Returns {kind, asset, heading, body} where kind is 'video' (play
+    this mp4 in the existing Gtk.Video renderer), 'cairo' (paint the
+    existing Cairo splash), or 'none' (nothing to play + reason in
+    body). Only reads local files (openings spec + clip existence) —
+    it never touches D-Bus, PAM, or the camera, so every canned state
+    previews with the daemon stopped.
+    """
+    from . import openings as _openings
+
+    active = active or "iphone"
+    state = state if state in PREVIEW_STATES else "scanning"
+    spec = _openings.spec(cfg or {}, active) or {}
+    if not spec or active == "none":
+        return {"kind": "none", "asset": "",
+                "heading": spec.get("name") or "Animation",
+                "body": "“No splash” selected — nothing to preview."}
+    clip_key = {"scanning": "iphone", "recognized": "success",
+                "denied": "failure"}.get(state, "iphone")
+    mp4 = ""
+    if active == "iphone":
+        try:
+            mp4 = _openings.glance_asset(
+                _openings.GLANCE_CLIPS.get(clip_key, ""))
+        except Exception:
+            mp4 = ""
+        if mp4 and os.path.exists(mp4):
+            bodies = {
+                "scanning": "The real unlock video — same clip the lock "
+                            "screen plays. Loops until closed.",
+                "recognized": "The success clip for this variant. Loops "
+                              "until closed.",
+                "denied": "The failure video for this variant. Loops "
+                          "until closed.",
+            }
+            return {"kind": "video", "asset": mp4,
+                    "heading": spec.get("name") or "Animation",
+                    "body": bodies[state] + " Preview only."}
+    notes = {
+        "scanning": "Live preview — same timing as the lock screen. "
+                    "Loops until closed.",
+        "recognized": "No clip for this variant — the lock pill shows "
+                      "the green check + Verified card. Splash timing "
+                      "below matches the lock screen.",
+        "denied": "No failure video for this variant — the lock pill "
+                  "shows the red glyph + shake. Splash timing below "
+                  "matches the lock screen.",
+    }
+    body = notes[state] + " Preview only."
+    if active == "iphone" and not mp4:
+        body += " (Unlock video missing — reinstall or run " \
+                "`sudo faceid-nim fetch-models`.)"
+    return {"kind": "cairo", "asset": "",
+            "heading": spec.get("name") or "Animation", "body": body}
+
+
+def daemon_down_message(error: object) -> str:
+    """Actionable, truthful message for genuinely daemon-dependent
+    operations. Never implies the daemon is connected."""
+    text = str(error or "")
+    if "was not provided" in text or "ServiceUnknown" in text or \
+            "cannot reach" in text:
+        return ("Daemon not running — the face service is unavailable. "
+                "Start it with `sudo systemctl start faceid-nimd` "
+                "(install the .deb first if needed). Clip previews above "
+                "need no daemon.")
+    return f"Daemon unavailable: {text or 'unknown error'}"
+
+
+def open_url(url: str, launcher=None) -> bool:
+    """Open *url* in the system browser. *launcher* is an injectable
+    callable used by tests; defaults to Gio.AppInfo.launch_default_for_uri.
+    Returns True on success, False on error. Only http(s) is allowed."""
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return False
+    try:
+        if launcher is not None:
+            launcher(url)
+            return True
+        Gio.AppInfo.launch_default_for_uri(url)
+        return True
+    except Exception:
+        logging.getLogger("faceid_app").exception("open_url failed")
+        return False
 
 # User-facing camera choices (stored in the app's own prefs, resolved
 # against actual discovered hardware before touching the daemon).
@@ -225,10 +400,10 @@ def run_diagnose() -> int:
 
 PAGES = [
     ("overview", "Overview", "avatar-default-symbolic"),
-    ("settings", "Settings", "preferences-system-symbolic"),
-    ("opening", "Opening", "applications-multimedia-symbolic"),
+    ("identities", "Identities", "system-users-symbolic"),
     ("cameras", "Cameras", "camera-web-symbolic"),
     ("security", "Security", "dialog-password-symbolic"),
+    ("settings", "Settings", "preferences-system-symbolic"),
     ("diagnostics", "Diagnostics", "utilities-system-monitor-symbolic"),
 ]
 
@@ -306,10 +481,10 @@ class Window(Adw.ApplicationWindow):
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         self.stack.add_named(self._overview_page(), "overview")
-        self.stack.add_named(self._settings_page(), "settings")
-        self.stack.add_named(self._opening_page(), "opening")
+        self.stack.add_named(self._identities_page(), "identities")
         self.stack.add_named(self._cameras_page(), "cameras")
         self.stack.add_named(self._security_page(), "security")
+        self.stack.add_named(self._settings_page(), "settings")
         self.stack.add_named(self._diagnostics_page(), "diagnostics")
         self.stack.set_hexpand(True)
         self.stack.set_vexpand(True)
@@ -363,12 +538,25 @@ class Window(Adw.ApplicationWindow):
 
         box.append(Gtk.Box(vexpand=True))
 
-        credit = Gtk.Label(
-            label="Created by zang aka Gaurav-x111",
-            halign=Gtk.Align.CENTER,
-            margin_start=14, margin_end=14, margin_top=4)
-        credit.add_css_class("dim-label")
-        box.append(credit)
+        sep = Gtk.Separator(margin_start=16, margin_end=16, margin_top=6,
+                            margin_bottom=2)
+        box.append(sep)
+        github_row = Gtk.ListBox()
+        github_row.add_css_class("navigation-sidebar")
+        grow = Gtk.ListBoxRow()
+        grow.set_tooltip_text(GITHUB_TOOLTIP)
+        gitem = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
+                        margin_start=12, margin_end=12,
+                        margin_top=8, margin_bottom=8)
+        gitem.append(github_image(16))
+        glabel = Gtk.Label(label="GitHub ↗", xalign=0)
+        glabel.add_css_class("dim-label")
+        gitem.append(glabel)
+        grow.set_child(gitem)
+        github_row.append(grow)
+        github_row.connect("row-selected", self._on_github_nav)
+        box.append(github_row)
+
         v = GLib.getenv("VERSION") or ""
         foot = Gtk.Label(label=f"faceid-nim{v}",
                          halign=Gtk.Align.CENTER,
@@ -386,7 +574,32 @@ class Window(Adw.ApplicationWindow):
         # row is simpler and works on every supported PyGObject version.
         self._title.set_text(getattr(row, "page_title", "Overview"))
 
+    def _on_github_nav(self, listbox, row) -> None:
+        if not row:
+            return
+        try:
+            listbox.unselect_all()
+        except Exception:
+            pass
+        if not open_url(GITHUB_URL):
+            self.toast("Could not open the browser for GitHub")
+
     # ---- pages --------------------------------------------------------
+    def _go(self, page: str) -> None:
+        """Navigate to a stack page and keep the sidebar selection in sync."""
+        try:
+            self.stack.set_visible_child_name(page)
+        except Exception:
+            return
+        for i, (name, _label, _icon) in enumerate(PAGES):
+            if name == page:
+                try:
+                    self.nav_list.select_row(
+                        self.nav_list.get_row_at_index(i))
+                except Exception:
+                    pass
+                break
+
     def _overview_page(self) -> Gtk.Widget:
         page = Adw.PreferencesPage()
         # PreferencesPage.add() only accepts PreferencesGroup on this
@@ -396,6 +609,41 @@ class Window(Adw.ApplicationWindow):
         hero_group.add(self._hero())
         page.add(hero_group)
 
+        self.overview_summary = Adw.PreferencesGroup(
+            title="Status",
+            description="Live summaries — details live on their own pages.")
+        self.overview_id_row = Adw.ActionRow(title="Identities")
+        go_id = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+        go_id.connect("clicked", lambda _b: self._go("identities"))
+        self.overview_id_row.add_suffix(go_id)
+        self.overview_summary.add(self.overview_id_row)
+        self.overview_cam_row = Adw.ActionRow(title="Cameras")
+        go_cam = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+        go_cam.connect("clicked", lambda _b: self._go("cameras"))
+        self.overview_cam_row.add_suffix(go_cam)
+        self.overview_summary.add(self.overview_cam_row)
+        self.overview_sec_row = Adw.ActionRow(title="Security & service")
+        go_sec = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+        go_sec.connect("clicked", lambda _b: self._go("security"))
+        self.overview_sec_row.add_suffix(go_sec)
+        self.overview_summary.add(self.overview_sec_row)
+        page.add(self.overview_summary)
+
+        next_group = Adw.PreferencesGroup(title="Next step")
+        self.overview_next_row = Adw.ActionRow(
+            title="Add an identity",
+            subtitle="Nine poses, about 20 seconds")
+        self.overview_next_btn = Gtk.Button(label="Enroll",
+                                            valign=Gtk.Align.CENTER)
+        self.overview_next_btn.add_css_class("suggested-action")
+        self.overview_next_btn.connect("clicked", self._on_overview_next)
+        self.overview_next_row.add_suffix(self.overview_next_btn)
+        next_group.add(self.overview_next_row)
+        page.add(next_group)
+        return page
+
+    def _identities_page(self) -> Gtk.Widget:
+        page = Adw.PreferencesPage()
         self.id_group = Adw.PreferencesGroup(
             title="Enrolled faces",
             description="Add several identities for the conditions you "
@@ -646,6 +894,11 @@ class Window(Adw.ApplicationWindow):
         cam.add(att)
         page.add(cam)
         page.add(advanced)
+        # Appearance & Animation lives under Settings (not a top-level
+        # page). The groups below own cb_opening/cb_scan_face/etc exactly
+        # once, so selection, preview and persistence stay wired.
+        for grp in self._appearance_groups():
+            page.add(grp)
         return page
 
     def _cameras_page(self) -> Gtk.Widget:
@@ -959,8 +1212,58 @@ class Window(Adw.ApplicationWindow):
         # the failure mode this whole reporting chain exists to prevent.
         if not live["ok"] and live["detail"]:
             self.toast(live["detail"])
+        self._update_overview(ids, diag, errors)
         self._refresh_openings()
         return GLib.SOURCE_REMOVE
+
+    def _on_overview_next(self, _b=None) -> None:
+        """Contextual Overview action: enroll when empty, otherwise open
+        Appearance & Animation under Settings."""
+        try:
+            n = len(self._id_rows)
+            has_identity = n > 0 and not (
+                n == 1 and isinstance(self._id_rows[0], Adw.ActionRow))
+        except Exception:
+            has_identity = False
+        if has_identity:
+            self._go("settings")
+        else:
+            self.on_enroll()
+
+    def _update_overview(self, ids: list, diag: dict,
+                         errors: list[str]) -> None:
+        """Mirror hero-dot truth in the Overview summaries (never a toggle
+        alone)."""
+        try:
+            n = len(ids)
+            self.overview_id_row.set_subtitle(
+                f"{n} enrolled" if n else "No faces enrolled — setup required")
+            cams = self._discovery or []
+            self.overview_cam_row.set_subtitle(
+                f"{len(cams)} camera(s) detected" if cams
+                else "Camera unavailable — check Cameras")
+            if errors:
+                sec = "Service unavailable — check Diagnostics"
+            elif not self._settings_cache.get("enabled", False):
+                sec = "Disabled"
+            elif not ids:
+                sec = "Setup required — enroll an identity"
+            else:
+                live = self._liveness_health(diag)
+                sec = live["summary"] if not live["ok"] else "Ready"
+            self.overview_sec_row.set_subtitle(sec)
+            if not ids:
+                self.overview_next_row.set_title("Add an identity")
+                self.overview_next_row.set_subtitle(
+                    "Nine poses, about 20 seconds")
+                self.overview_next_btn.set_label("Enroll")
+            else:
+                self.overview_next_row.set_title("Review your animations")
+                self.overview_next_row.set_subtitle(
+                    "Settings → Appearance & Animation")
+                self.overview_next_btn.set_label("Open")
+        except Exception:
+            pass
 
     @staticmethod
     def _liveness_health(diag: dict) -> dict:
@@ -991,9 +1294,12 @@ class Window(Adw.ApplicationWindow):
                        "fetch-models).")
         return {"ok": False, "summary": summary, "detail": detail}
 
-    # ---- opening animation UI ----------------------------------------
-    def _opening_page(self) -> Gtk.Widget:
-        page = Adw.PreferencesPage()
+    # ---- appearance & animation UI (Settings subsection) --------------
+    def _appearance_groups(self) -> list:
+        """Build the Appearance & Animation groups. Called once from
+        _settings_page so selection + preview live under Settings.
+        Persisted openings.json ids/values are unchanged."""
+        groups: list = []
 
         anim = Adw.PreferencesGroup(
             title="Animations",
@@ -1008,10 +1314,10 @@ class Window(Adw.ApplicationWindow):
         self.sw_animations.connect("notify::active",
                                    self.on_animations_changed)
         anim.add(self.sw_animations)
-        page.add(anim)
+        groups.append(anim)
 
         sel = Adw.PreferencesGroup(
-            title="Opening animation",
+            title="Appearance & Animation: opening animation",
             description="Glance video pill is the default — the real "
                         "unlock video, playing on the lock screen. The "
                         "choice applies at the very next lock — no "
@@ -1035,7 +1341,24 @@ class Window(Adw.ApplicationWindow):
         self.preview_label.add_css_class("dim-label")
         prev.append(self.preview_label)
         sel.add(prev)
-        page.add(sel)
+
+        # Canonical preview state selector: scanning / recognized / denied.
+        # Presentation only — it chooses which visual the preview below
+        # plays and never touches authentication.
+        self.cb_preview_state = Adw.ComboRow(
+            title="Preview state",
+            subtitle="Scanning shows the in-progress visual, Recognized "
+                     "the success clip, Denied the failure visual",
+            model=Gtk.StringList.new(PREVIEW_STATE_LABELS))
+        self.cb_preview_state.set_selected(0)
+        self.cb_preview_state.connect("notify::selected",
+                                      self._on_preview_state_changed)
+        sel.add(self.cb_preview_state)
+        self.preview_state_label = Gtk.Label(label="Selected state: Scanning",
+                                             xalign=0)
+        self.preview_state_label.add_css_class("dim-label")
+        sel.add(self.preview_state_label)
+        groups.append(sel)
 
         faceg = Adw.PreferencesGroup(
             title="Scanner",
@@ -1046,7 +1369,7 @@ class Window(Adw.ApplicationWindow):
         self.cb_scan_face = Adw.ComboRow(
             title="Scan face",
             subtitle="Smile (face outline, default), Orbit (halo/crest) or Classic",
-            model=Gtk.StringList.new(["Smile (default)", "Orbit", "Classic"]))
+            model=Gtk.StringList.new(SCAN_FACE_LABELS))
         self._scanface_notify_id = self.cb_scan_face.connect(
             "notify::selected", self.on_scan_face_selected)
         faceg.add(self.cb_scan_face)
@@ -1067,16 +1390,14 @@ class Window(Adw.ApplicationWindow):
             preview_box.append(btn)
             self._scan_face_previews.append(btn)
         faceg.add(preview_box)
-        page.add(faceg)
+        groups.append(faceg)
 
         pvgroup = Adw.PreferencesGroup(
             title="Preview",
-            description="Glance video pill is the default opening. Watch "
-                        "the full mp4 here (separate test window), play "
-                        "the selected opening inline, or play the "
-                        "lock-pill Verified → Welcome sequence on the "
-                        "real pill. All are previews only — no camera, no "
-                        "authentication.")
+            description="Plays the selected variant's own assets for the "
+                        "state chosen above — never another variant's "
+                        "hard-coded clip. All are previews only — no "
+                        "camera, no authentication.")
         vrow = Adw.ActionRow(
             title="Preview video pill (mp4)",
             subtitle="Full Glance unlock video "
@@ -1087,22 +1408,31 @@ class Window(Adw.ApplicationWindow):
         vrow.add_suffix(vb)
         pvgroup.add(vrow)
         prow = Adw.ActionRow(
-            title="Preview success animation",
-            subtitle="Ring sweep, check, Verified, Welcome, identity "
-                     "on the lock pill")
+            title="Play on the lock pill (needs daemon)",
+            subtitle="Ring sweep, check, Verified, Welcome on the real "
+                     "pill via PreviewAnimation — needs faceid-nimd; "
+                     "the clip previews play without it")
         pb = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
         pb.connect("clicked", self._preview_success)
         prow.add_suffix(pb)
         pvgroup.add(prow)
         orow = Adw.ActionRow(
-            title="Preview opening animation",
-            subtitle="Play the selected opening animation inline")
+            title="Preview selected state",
+            subtitle="Play the scanning / recognized / denied visual for "
+                     "the active animation")
         ob = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
         ob.add_css_class("suggested-action")
-        ob.connect("clicked", self._preview_opening_inline)
+        ob.connect("clicked", self._preview_selected_state)
         orow.add_suffix(ob)
         pvgroup.add(orow)
-        page.add(pvgroup)
+        drow = Adw.ActionRow(
+            title="Preview denied visual",
+            subtitle="Failure clip or red glyph for the active animation")
+        db = Gtk.Button(label="Play", valign=Gtk.Align.CENTER)
+        db.connect("clicked", self._preview_denied)
+        drow.add_suffix(db)
+        pvgroup.add(drow)
+        groups.append(pvgroup)
 
         make = Adw.PreferencesGroup(title="Make your own")
         row = Adw.ActionRow(
@@ -1114,7 +1444,7 @@ class Window(Adw.ApplicationWindow):
         b.connect("clicked", lambda _b: self._open_editor())
         row.add_suffix(b)
         make.add(row)
-        page.add(make)
+        groups.append(make)
 
         get = Adw.PreferencesGroup(
             title="Get animations",
@@ -1146,14 +1476,14 @@ class Window(Adw.ApplicationWindow):
         bb.connect("clicked", self._browse_community)
         brow.add_suffix(bb)
         get.add(brow)
-        page.add(get)
+        groups.append(get)
 
         self.opening_group = Adw.PreferencesGroup(
             title="Your animations",
             description="Edit, export for sharing, publish to GitHub, "
                         "or delete.")
-        page.add(self.opening_group)
-        return page
+        groups.append(self.opening_group)
+        return groups
 
     @staticmethod
     def _opening_summary(s: dict) -> str:
@@ -1178,11 +1508,129 @@ class Window(Adw.ApplicationWindow):
         if self._suspend_changes:
             return
         sel = row.get_selected()
-        face = ["apple", "arena", "classic"][min(sel, 2)] \
-            if sel != Gtk.INVALID_LIST_POSITION else "apple"
+        face = SCAN_FACE_VALUES[min(sel, len(SCAN_FACE_VALUES) - 1)] \
+            if sel != Gtk.INVALID_LIST_POSITION else SCAN_FACE_VALUES[0]
         self._openings["scan_face"] = face
         openings.save(self._openings)
-        logging.getLogger("faceid_app").info("scan face set to %s", face)
+        logging.getLogger("faceid_app").info("scan face changed")
+
+    def _on_preview_state_changed(self, row, _param=None) -> None:
+        sel = row.get_selected()
+        if sel == Gtk.INVALID_LIST_POSITION:
+            return
+        state = PREVIEW_STATES[min(sel, len(PREVIEW_STATES) - 1)]
+        try:
+            self.preview_state_label.set_text(
+                f"Selected state: {PREVIEW_STATE_LABELS[min(sel, 2)]} — "
+                f"playing this variant's {state} visual")
+        except Exception:
+            pass
+
+    def _selected_preview_state(self) -> str:
+        try:
+            sel = self.cb_preview_state.get_selected()
+        except Exception:
+            return "scanning"
+        if sel == Gtk.INVALID_LIST_POSITION:
+            return "scanning"
+        return PREVIEW_STATES[min(sel, len(PREVIEW_STATES) - 1)]
+
+    def _preview_selected_state(self, _b=None) -> None:
+        """Play the selected state's visual for the active variant.
+
+        Daemon-independent: the plan comes from local files only, so
+        scanning/recognized/denied all preview with the service
+        stopped. Never authenticates, never touches PAM."""
+        state = self._selected_preview_state()
+        active = self._openings.get("active") or "iphone"
+        plan = preview_plan_for_state(active, state, self._openings)
+        if plan["kind"] == "none":
+            self.toast(plan["body"])
+            return
+        self._play_preview_plan(plan, active)
+
+    def _preview_denied(self, _b=None) -> None:
+        """Play the denied/failure visual for the active animation.
+
+        Daemon-independent (see _preview_selected_state)."""
+        active = (self._openings.get("active") or "iphone")
+        plan = preview_plan_for_state(active, "denied", self._openings)
+        if plan["kind"] == "none":
+            self.toast(plan["body"])
+            return
+        self._play_preview_plan(plan, active)
+
+    def _play_preview_plan(self, plan: dict, active: str) -> None:
+        """Render one daemon-free preview plan with the existing
+        renderers: Gtk.Video for clips, Cairo DrawingArea otherwise.
+        One tick at a time, removed on dialog close."""
+        s = openings.spec(self._openings, active) or {}
+        dlg = Adw.AlertDialog(heading=plan.get("heading") or "Animation",
+                              body=plan.get("body") or "",
+                              extra_child=self._preview_plan_widget(
+                                  plan, active, s))
+        dlg.add_response("close", "Close")
+        tick_id = {"id": 0}
+        widget = dlg.get_extra_child()
+        preview = getattr(widget, "_preview_area", None)
+        if plan.get("kind") != "video" and preview is not None:
+            def _tick():
+                try:
+                    preview.queue_draw()
+                except Exception:
+                    return False
+                return True
+
+            tick_id["id"] = GLib.timeout_add(33, _tick)
+        self.preview_area.queue_draw()
+
+        def _done(_d, _r):
+            try:
+                if tick_id["id"]:
+                    GLib.source_remove(tick_id["id"])
+            except Exception:
+                pass
+            tick_id["id"] = 0
+            dlg.close()
+
+        dlg.connect("response", _done)
+        dlg.present(self)
+
+    def _preview_plan_widget(self, plan: dict, active: str,
+                             spec: dict) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      width_request=320, height_request=360)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_halign(Gtk.Align.CENTER)
+        if plan.get("kind") == "video" and plan.get("asset"):
+            video = Gtk.Video.new_for_filename(plan["asset"])
+            try:
+                video.set_autoplay(True)
+                video.set_loop(True)
+            except Exception:
+                pass
+            # 432x432 sources letterbox in 280x200: aspect preserved,
+            # no stretch/crop of the lock-screen composition.
+            video.set_size_request(280, 200)
+            box.append(video)
+        else:
+            preview = Gtk.DrawingArea(width_request=280, height_request=80)
+            preview.add_css_class("opening-preview")
+            start = GLib.get_monotonic_time()
+
+            def draw(area, cr, w, h, _data):
+                now_ms = (GLib.get_monotonic_time() - start) / 1000
+                period = 1600 if active == "iphone" else max(
+                    int(spec.get("fade_ms") or 420) + 700, 900)
+                self._draw_opening_preview_at(cr, w, h, now_ms % period)
+            preview.set_draw_func(draw, None)
+            box.append(preview)
+            box._preview_area = preview
+        label = Gtk.Label(label=spec.get("description") or "")
+        label.add_css_class("dim-label")
+        label.set_wrap(True)
+        box.append(label)
+        return box
 
     def _refresh_openings(self) -> None:
         cfg = self._openings
@@ -1196,9 +1644,9 @@ class Window(Adw.ApplicationWindow):
         self._suspend_changes = True
         self._block_opening_signals(True)
         try:
-            _face_idx = {"apple": 0, "arena": 1, "classic": 2}
+            _face_idx = {v: i for i, v in enumerate(SCAN_FACE_VALUES)}
             self.cb_scan_face.set_selected(
-                _face_idx.get(cfg.get("scan_face", "apple"), 0))
+                _face_idx.get(cfg.get("scan_face", SCAN_FACE_VALUES[0]), 0))
             names = []
             for vid in ids:
                 s = openings.spec(cfg, vid) or {}
@@ -1391,90 +1839,25 @@ class Window(Adw.ApplicationWindow):
     def _preview_opening_inline(self, _b=None) -> None:
         """Play the selected opening animation in a dialog.
 
-        Glance plays the real mp4 (the same unlock video the lock
-        screen flips through as frames). Everything else previews with
-        the same timing as the lock screen, looping until closed, so
-        the choice can be judged before the next lock."""
+        Daemon-independent scanning preview: the plan resolves the
+        active variant's own clip (the same unlock video the lock
+        screen flips through as frames) or the Cairo splash with lock-
+        screen timing, looping until closed."""
         active = self._openings.get("active") or "iphone"
-        s = openings.spec(self._openings, active) or {}
-        if not s:
-            self.toast("No animation selected")
+        plan = preview_plan_for_state(active, "scanning", self._openings)
+        if plan["kind"] == "none":
+            self.toast(plan["body"])
             return
-        if active == "none":
-            self.toast("“No splash” selected — nothing to preview")
-            return
-
-        mp4 = ""
-        if active == "iphone":
-            mp4 = openings.glance_asset(
-                openings.GLANCE_CLIPS.get("iphone", ""))
-        dlg = Adw.AlertDialog(
-            heading=s.get("name") or "Animation",
-            body=("The real unlock video — same clip the lock screen "
-                  "plays. Loops until closed." if mp4 else
-                  "Live preview — same timing as the lock screen. "
-                  "Loops until closed."))
-        dlg.add_response("close", "Close")
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                      width_request=300, height_request=140)
-        box.set_valign(Gtk.Align.CENTER)
-        box.set_halign(Gtk.Align.CENTER)
-
-        if mp4:
-            video = Gtk.Video.new_for_filename(mp4)
-            video.set_autoplay(True)
-            video.set_loop(True)
-            video.set_size_request(280, 280)
-            box.append(video)
-        else:
-            preview = Gtk.DrawingArea(width_request=280, height_request=80)
-            preview.add_css_class("opening-preview")
-            start = GLib.get_monotonic_time()
-
-            def draw(area, cr, w, h, _data):
-                now_ms = (GLib.get_monotonic_time() - start) / 1000
-                period = 1600 if active == "iphone" else max(
-                    int(s.get("fade_ms") or 420) + 700, 900)
-                self._draw_opening_preview_at(cr, w, h, now_ms % period)
-            preview.set_draw_func(draw, None)
-            box.append(preview)
-
-        label = Gtk.Label(label=s.get("description") or "")
-        label.add_css_class("dim-label")
-        label.set_wrap(True)
-        box.append(label)
-
-        tick_id = {"id": 0}
-
-        if not mp4:
-            def _tick():
-                try:
-                    preview.queue_draw()
-                except Exception:
-                    return False
-                return True
-
-            tick_id["id"] = GLib.timeout_add(33, _tick)
-        self.preview_area.queue_draw()
-
-        def _done(_d, _r):
-            try:
-                if tick_id["id"]:
-                    GLib.source_remove(tick_id["id"])
-            except Exception:
-                pass
-            tick_id["id"] = 0
-            dlg.close()
-
-        dlg.connect("response", _done)
-        dlg.present(self)
+        self._play_preview_plan(plan, active)
 
     def _preview_success(self, _b=None) -> None:
-        """Developer-only: ask the daemon to play the full success
-        sequence on the lock pill (ring, check, Verified, Welcome,
-        identity). The daemon only emits ScanState -- it can never
-        unlock anything or touch a decision path."""
+        """Daemon-gated: ask the daemon to play the full success
+        sequence on the real lock pill (ring, check, Verified,
+        Welcome, identity). The daemon only emits ScanState -- it can
+        never unlock anything or touch a decision path.
+
+        This is the one preview that genuinely needs the service; the
+        clip/Cairo previews above work without it."""
 
         def run():
             identity = ""
@@ -1485,14 +1868,14 @@ class Window(Adw.ApplicationWindow):
                         break
                 self.daemon.preview_animation(identity)
                 return None
-            except Exception:
-                return "unavailable"
+            except Exception as e:
+                return daemon_down_message(e)
 
         def then(res):
             if res is None:
                 self.toast("Success animation previewing now")
             else:
-                self.toast("Preview unavailable — is the daemon up to date?")
+                self.toast(res)
 
         self._thread(run, then)
 
@@ -1742,12 +2125,41 @@ class Window(Adw.ApplicationWindow):
         try:
             vid = openings.install_package(f.get_path())
         except ValueError as e:
+            if "already exists" in str(e):
+                self._confirm_replace_file(f.get_path(), str(e))
+                return
             self.toast(str(e))
             return
         self._openings = openings.load()
         openings.set_active(self._openings, vid)
         self._refresh_openings()
         self.toast(f"Installed {vid} — now active")
+
+    def _confirm_replace_file(self, path: str, reason: str) -> None:
+        dlg = Adw.AlertDialog(
+            heading="Replace this animation?",
+            body=f"{reason}. Replacing deletes your current variant "
+                 "before installing the package.")
+        dlg.add_response("cancel", "Keep mine")
+        dlg.add_response("replace", "Replace")
+        dlg.set_response_appearance("replace",
+                                    Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_d, resp: str) -> None:
+            if resp != "replace":
+                return
+            try:
+                vid = openings.install_package(path, overwrite=True)
+            except ValueError as e:
+                self.toast(str(e))
+                return
+            self._openings = openings.load()
+            openings.set_active(self._openings, vid)
+            self._refresh_openings()
+            self.toast(f"Installed {vid} — now active")
+
+        dlg.connect("response", on_response)
+        dlg.present(self)
 
     def _open_url_install(self, _b=None) -> None:
         entry = Gtk.Entry()
@@ -1819,16 +2231,42 @@ class Window(Adw.ApplicationWindow):
 
     def _install_url(self, url: str, label: str = "") -> None:
         self.toast(f"Installing {label or url}…")
-        self._thread(lambda: openings.download_and_install(url), self._done_url)
+        self._thread(lambda: openings.download_and_install(url),
+                     lambda res: self._done_url(res, url=url, label=label))
 
-    def _done_url(self, result) -> None:
+    def _done_url(self, result, url: str = "", label: str = "") -> None:
         if isinstance(result, Exception):
+            if "already exists" in str(result) and url:
+                self._confirm_replace_url(url, label, str(result))
+                return
             self.toast(f"Install failed: {result}")
             return
         self._openings = openings.load()
         openings.set_active(self._openings, result)
         self._refresh_openings()
         self.toast(f"Installed {result} — now active")
+
+    def _confirm_replace_url(self, url: str, label: str,
+                             reason: str) -> None:
+        dlg = Adw.AlertDialog(
+            heading="Replace this animation?",
+            body=f"{reason}. Replacing deletes your current variant "
+                 "before installing the download.")
+        dlg.add_response("cancel", "Keep mine")
+        dlg.add_response("replace", "Replace")
+        dlg.set_response_appearance("replace",
+                                    Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_d, resp: str) -> None:
+            if resp != "replace":
+                return
+            self.toast(f"Installing {label or url}…")
+            self._thread(
+                lambda: openings.download_and_install(url, overwrite=True),
+                lambda res: self._done_url(res))
+
+        dlg.connect("response", on_response)
+        dlg.present(self)
 
     # -- share / delete ------------------------------------------------
     def _open_share(self, variant_id: str) -> None:
@@ -1843,10 +2281,10 @@ class Window(Adw.ApplicationWindow):
             self.toast(str(e))
             return
         name = s["name"]
-        gist = (f"gh gist create '{path}' --public "
-                f"--desc '{name} — faceid-nim opening animation'")
-        rel = (f"gh release create v1 '{path}' "
-               f"--repo <you>/<repo> --generate-notes")
+        gist = (f"gh gist create {shlex.quote(path)} --public "
+                f"--desc {shlex.quote(name + ' — faceid-nim opening animation')}")
+        rel = (f"gh release create v1 {shlex.quote(path)} "
+                f"--repo <you>/<repo> --generate-notes")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                       width_request=470)
         head = Gtk.Label(label=f"Exported to\n{path}", xalign=0, wrap=True)
@@ -1888,6 +2326,7 @@ class Window(Adw.ApplicationWindow):
         cfg = self._openings
         s = openings.spec(cfg, variant_id)
         name = s.get("name") if s else variant_id
+        snapshot = dict(s or {})
         dlg = Adw.AlertDialog(
             heading="Delete this animation?",
             body="The animation and its logo files are removed from this "
@@ -1900,28 +2339,36 @@ class Window(Adw.ApplicationWindow):
             if resp == "delete":
                 if openings.remove_variant(self._openings, variant_id):
                     self._refresh_openings()
-                    self._show_undo_toast(variant_id, name)
+                    self._show_undo_toast(variant_id, name, snapshot)
 
         dlg.connect("response", on_response)
         dlg.present(self)
 
-    def _show_undo_toast(self, variant_id: str, name: str) -> None:
+    def _show_undo_toast(self, variant_id: str, name: str,
+                         snapshot: dict | None = None) -> None:
+        # Snapshot the full spec so Undo restores colours/text/ease, not a
+        # blank stub. Logo files are already removed by remove_variant, so
+        # logo-bearing variants restore without their file (description
+        # notes this); spec colours/text survive.
+        snapshot = dict(snapshot or {})
         toast = Adw.Toast(title=f"Deleted {name}")
         toast.set_button_label("Undo")
-        toast.connect("button-clicked", lambda _t: self._undo_delete(variant_id, name))
+        toast.connect("button-clicked",
+                      lambda _t: self._undo_delete(variant_id, name, snapshot))
         toast.set_timeout(5)
         self.toasts.add_toast(toast)
 
-    def _undo_delete(self, variant_id: str, name: str) -> None:
+    def _undo_delete(self, variant_id: str, name: str,
+                     snapshot: dict | None = None) -> None:
         cfg = self._openings
-        cfg.setdefault("variants", {})[variant_id] = {
-            "kind": "custom",
-            "name": name,
-            "ease": "outCubic",
-            "fade_ms": 420,
-            "scale": True,
-            "ring": False,
-        }
+        spec = dict(snapshot or {})
+        spec.setdefault("kind", "custom")
+        spec.setdefault("name", name)
+        spec.setdefault("ease", "outCubic")
+        spec.setdefault("fade_ms", 420)
+        spec.setdefault("scale", True)
+        spec.setdefault("ring", False)
+        cfg.setdefault("variants", {})[variant_id] = spec
         openings.save(cfg)
         self._openings = openings.load()
         self._refresh_openings()
@@ -2237,13 +2684,13 @@ class Window(Adw.ApplicationWindow):
         # Render with a sample name so {name} can be heard.
         template = self._prefs.get("greeting_text", "Welcome {name}")
         try:
-            sample = "Zang"
+            sample = "Friend"
             for _n, _e, _m in (self.daemon.list_identities() or []):
                 if _e:
                     sample = _n
                     break
         except Exception:
-            sample = "Zang"
+            sample = "Friend"
         try:
             text = str(template or "Welcome {name}").replace("{name}", sample)[:160]
         except Exception:

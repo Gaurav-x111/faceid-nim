@@ -192,8 +192,8 @@ sudo dbus-send --system --type=signal /org/faceidnim/Daemon1 \
 
 ## Adding your own animation in GNOME
 
-Customization lives in the app → **Opening** page, stored per user in
-`~/.config/faceid-nim/openings.json`:
+Customization lives in the app → **Settings → Appearance & Animation**,
+stored per user in `~/.config/faceid-nim/openings.json`:
 
 ```json
 {
@@ -203,17 +203,19 @@ Customization lives in the app → **Opening** page, stored per user in
 }
 ```
 
-**Scanner style** (`Opening → Scanner`): shown as **Smile
+**Scanner style** (`Settings → Appearance & Animation → Scanner`): shown as **Smile
 (default)** = thin track + progress arc + smiling face,
 **Orbit** = halo/crest/comet scanner, **Classic** = original ring.
 
-**The opening** (`Opening → Active animation`): built-ins `iphone`
+**The opening** (`Settings → Appearance & Animation → Active animation`): built-ins `iphone`
 (default, the unlock video), `logo`, `glow`, `none` — or **Create an opening animation**: pick
 a headline, colours, easing, duration, optional logo → **Publish to
 GitHub** exports a `.faceopen` package with ready `gh` commands.
 Others install via **Install from file** / **Install from URL**, or
 the **Browse community** catalogue. Your choice applies at the very
-next lock — no extension reload, no restart.
+next lock — no extension reload, no restart. Replacing an existing id
+asks for confirmation; deleting offers a 5 s Undo (spec restored, logo
+files not recoverable).
 
 `.faceopen` is a zip with `opening.json` (+ optional `logo.svg`/`png`):
 
@@ -232,6 +234,40 @@ non-object `opening.json` metadata is rejected with an install error.
 To add yours to the catalogue, PR your `.faceopen` into
 `openings/packages/` plus one entry in `openings/catalog.json`
 (see `openings/README.md`).
+
+## App navigation, preview states & GitHub
+
+Sidebar: **Overview, Identities, Cameras, Security, Settings,
+Diagnostics**, plus a separated **GitHub ↗** link at the bottom
+(`View source code, releases, and development updates.`). The link
+opens `https://github.com/Gaurav-x111/faceid-nim` in the system
+browser via `Gio.AppInfo.launch_default_for_uri` — no embedded
+browser, no startup network request.
+
+Appearance & Animation lives under **Settings** (not a top-level
+page). The preview selector uses the canonical presentation states
+`scanning` / `recognized` / `denied`, resolved from the **selected**
+variant's own assets (success clip, failure clip or Cairo fallback) —
+never another variant's hard-coded clip, never a live auth signal.
+All three play with the daemon stopped; only "Play on the lock pill"
+needs `faceid-nimd` and says so when it is absent.
+Production `ScanState` maps `waking|searching|verifying → scanning`,
+`matched → recognized`, `rejected|timeout|camera_error → denied`;
+unknown signals fall back to scanning. Preview controls cannot invoke
+privileged auth actions; the lock-screen pill is listen-only (no bus
+method calls). Full pipeline diagrams: `docs/animation-pipeline.md`.
+
+Video: 432×432 H.264 60 fps source clips in
+`linux-anim/glance_anim/assets/`; the lock screen plays 216×216 PNG
+frames (`shell-ext/faceid@nim/glance-frames/`, success clip only —
+denied is glyph-only by design); the app letterboxes clips in a
+280×200 `Gtk.Video` frame (aspect preserved). No WebKit/HTML preview
+exists by design — Cairo + `Gtk.Video` is the renderer.
+
+**Update checking is deferred, not implemented.** The GitHub link does
+not check versions, and no background request ever runs. To check
+manually, compare the installed version (`faceid-nim status`) with the
+published Releases page linked from the repo.
 
 ## Camera modes (RGB / IR / Hybrid)
 
@@ -414,7 +450,7 @@ numbers, never "99% accurate".
   can no longer overwrite a fresh one. At the GDM login screen the
   default iPhone animation always plays; your choice applies on your
   own lock screen.
-- **Adding your own:** Opening page → Create (format above); swapping
+- **Adding your own:** Settings → Appearance & Animation → Create (format above); swapping
   the iPhone video itself takes the mp4 *plus* re-extracted
   lock-screen frames — steps and sizes in `docs/animations.md`.
 - **How many faces?** No fixed identity cap (15 templates each). With

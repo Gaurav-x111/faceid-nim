@@ -14,8 +14,9 @@ On-disk layout:
     ~/.config/faceid-nim/openings/<id>/logo.svg
         optional per-variant assets
 
-Packages (".faceopen") are zips: opening.json + optional logo.svg +
-optional preview.svg.  "Publishing to GitHub" is simply exporting a
+Packages (".faceopen") are zips: opening.json + optional logo.svg /
+logo.png (only one is used; extra files are ignored, not executed).
+"Publishing to GitHub" is simply exporting a
 package and stashing it anywhere; friends install it by raw URL (the
 "Install from URL" path in the app) or from a file.
 """
@@ -365,8 +366,12 @@ def export_package(cfg: dict, variant_id: str, dest_dir: str) -> str:
     return out
 
 
-def install_package(package_path: str) -> str:
-    """Validate a .faceopen zip, extract it and register the variant."""
+def install_package(package_path: str, overwrite: bool = False) -> str:
+    """Validate a .faceopen zip, extract it and register the variant.
+
+    Refuses to overwrite an existing custom variant unless
+    overwrite=True, so a same-id package cannot silently destroy the
+    user's variant (caller shows a confirm dialog first)."""
     real = os.path.realpath(package_path)
     if not os.path.isfile(real):
         raise ValueError("The file does not exist")
@@ -402,6 +407,9 @@ def install_package(package_path: str) -> str:
     if not vid or vid in BUILTIN:
         z.close()
         raise ValueError("Package has no usable id")
+    if not overwrite and os.path.isdir(variant_dir(vid)):
+        z.close()
+        raise ValueError(f"“{vid}” already exists — confirm replace first")
 
     logo_name = None
     for n in names:
@@ -464,7 +472,7 @@ def download(url: str) -> bytes:
     return data
 
 
-def download_and_install(url: str) -> str:
+def download_and_install(url: str, overwrite: bool = False) -> str:
     data = download(str(url).strip())
     if not data:
         raise ValueError("Empty download")
@@ -472,7 +480,7 @@ def download_and_install(url: str) -> str:
         f.write(data)
         tmp = f.name
     try:
-        return install_package(tmp)
+        return install_package(tmp, overwrite=overwrite)
     finally:
         try:
             os.unlink(tmp)

@@ -299,7 +299,8 @@ class FaceIdPill extends St.Widget {
         // drops mid-success and the check must not race it. A sudo/polkit
         // prompt in an unlocked session stays on "Verified".
         this._loginContext = this._detectLoginContext();
-        // User animation switch (app → Opening → Play animations).
+        // User animation switch (app → Settings → Appearance &
+        // Animation → Play animations).
         // Read live on every scan: toggling needs no reload. Off
         // behaves like reduced motion — result shows, motion collapses.
         try { this._animOff = !animationsEnabled(); }

@@ -49,7 +49,8 @@ const CONFIG_PATH = GLib.build_filenamev([
 const APP_JSON = GLib.build_filenamev([
     GLib.get_home_dir(), '.config', 'faceid-nim', 'app.json']);
 
-// User-facing animation on/off (Face Unlock app → Opening → Play
+// User-facing animation on/off (Face Unlock app → Settings →
+// Appearance & Animation → Play
 // animations). Read live on every scan so the toggle applies at the
 // next lock with no reload. Missing file or bad JSON = animations on
 // (today's behaviour); the app writes animations_enabled: false.

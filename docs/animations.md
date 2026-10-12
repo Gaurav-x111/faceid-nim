@@ -43,7 +43,7 @@ easing curves and one logo image; an installed animation can repaint
 the pill but can never execute in the shell.
 
 **Route 1 — a custom variant (logo + text + colours).** In the app's
-Opening page, create a variant: name, status text, background/accent
+Settings → Appearance & Animation, create a variant: name, status text, background/accent
 colours (`#rrggbb`), easing (`outCubic`/`outBack`/`outExpo`),
 fade 120–3000 ms, optional scale pop and progress ring, plus a logo
 image (`SVG or PNG`, stored at
@@ -52,9 +52,12 @@ format — the spec keys are `kind, name, description, logo, text, bg,
 accent, ease, fade_ms, scale, ring` (`_clean_spec`).
 
 **Route 2 — a `.faceopen` package (sharing).** A zip containing
-`opening.json` + optional `logo.svg` + optional `preview.svg`, at most
-2 MB / 20 files (`MAX_UNPACK_BYTES`, `MAX_UNPACK_FILES`). Install from
-file or raw URL in the app. Publishing is just exporting the zip.
+`opening.json` + optional `logo.svg`/`logo.png`, at most
+2 MB / 20 files (`MAX_UNPACK_BYTES`, `MAX_UNPACK_FILES`). `preview.svg`
+is not read or written — packages claiming it install without it.
+Replacing an existing id asks for explicit confirmation; deleting
+offers Undo (spec restored; logo files are not recoverable). Install
+from file or raw URL in the app. Publishing is just exporting the zip.
 
 **Route 3 — replacing the iPhone video itself (advanced).** The app
 previews `linux-anim/glance_anim/assets/unlockanimation.mp4` directly
