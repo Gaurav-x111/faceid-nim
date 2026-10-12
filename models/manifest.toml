@@ -15,11 +15,10 @@
 #     non-commercial research use. Do NOT put them in a public package
 #     without checking.
 #   - MediaPipe Face Landmarker bundle: Apache-2.0, safe to fetch.
-#   - Silent-Face-Anti-Spoofing MiniFASNet: check the repository terms.
-#     The `antispoof` entry below is still UNPINNED, so it is never
-#     loaded and the `antispoof_model` deny cue never fires. That is
-#     deliberate and reported honestly in `faceid-nim status` rather
-#     than papered over.
+#   - Silent-Face-Anti-Spoofing MiniFASNet: Apache-2.0, same as upstream
+#     (minivision-ai). The `antispoof` entry pins the garciafido ONNX
+#     export of the upstream 2.7_80x80_MiniFASNetV2 weights; verify the
+#     hash yourself with `sha256sum` before trusting it.
 
 [model.detector]
 file = "face_detection_yunet_2023mar.onnx"
@@ -41,19 +40,40 @@ embedding_dim = 128
 
 [model.antispoof]
 file = "minifasnet_v2.onnx"
-# The MiniFASNet checkpoints ship with the source repo (test_data +
-# pre-trained .pth); the v2 ONNX export used by this project is not
-# published at a stable URL today, so this model is OPTIONAL at load
-# time (build_engine already treats a missing/refused antispoof as
-# spoof-path=None). Fetch or convert it separately, then pin its hash
-# here. Leave it out of pinning until you have the exact artifact.
+# ONNX export of upstream 2.7_80x80_MiniFASNetV2 weights, opset 11.
+# Provenance: garciafido/minifasnet-v2-anti-spoofing-onnx (Hugging Face),
+# converted from minivision-ai/Silent-Face-Anti-Spoofing
+# resources/anti_spoof_models/2.7_80x80_MiniFASNetV2.pth; weights are
+# bit-equivalent to upstream, only the serialization changed.
+# Interface verified 2026-10-07: input (batch,3,80,80) float32 BGR in
+# [0,1], output (batch,3) logits with index 1 = live (0 = print attack,
+# 2 = replay attack) -- matches passive.py and the upstream test.py
+# convention (`label == 1` is Real). Scale 2.7 matches the worker crop.
 #
-# While it stays unpinned: resolve_optional() refuses to load it, the
-# `antispoof_model` deny cue never fires, and status reports the passive
-# ML anti-spoof check as unavailable. Do not advertise it as running.
-url = ""
-sha256 = ""
-license = "verify before shipping"
+# Pinned 2026-10-07, UNPINNED 2026-10-12: on-device measurement on a
+# real webcam (/dev/video1, MJPG 640x480) showed this export classifies
+# a live face as replay attack at p≈0.993, stable across 8 frames, all
+# crop scales 1.0x-3.5x, and BGR/RGB alike -- sensor-incompatible, not
+# borderline, so no threshold or label mapping rescues it. While pinned,
+# every unlock died as liveness_deny:antispoof_model with valid_frames
+# 1. Unpinned, resolve_optional() refuses it, fetch-models skips it,
+# and the worker degrades to the classical cues (moire/glare/blink/
+# planarity) while status reports the check as unavailable. Do NOT
+# re-pin without live-face AND spoof-sample evidence measured on the
+# target camera: a real face must score clearly live and a screen/print
+# attack clearly spoof under the same mapping.
+#
+# Hunt 2026-10-12 (all rejected, none pinned): MiniFASNet-V1SE export
+# scored 0.973 stable spoof; an independent V2 export scored 0.994 (same
+# weights, so the export was never the problem); facenox
+# best_model.onnx (Apache-2.0, 2-class Real/Spoof, 128 RGB) was erratic
+# frame to frame (diff -5.1..+6.3) and mostly spoof; MJPG vs uncompressed
+# YUYV changed nothing. Every tested CNN reads this webcam's live faces
+# as attacks, so ML anti-spoof stays unavailable until a model proves
+# itself on this sensor.
+url = "https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx/resolve/main/minifasnet_v2.onnx"
+sha256 = "UNPINNED-2026-10-12-live-face-scores-0.993-replay"
+license = "Apache-2.0"
 model_id = "minifasnet_v2"
 input_size = [80, 80]
 optional = true

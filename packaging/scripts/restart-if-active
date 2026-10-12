@@ -1,0 +1,15 @@
+#!/bin/sh
+# restart-if-active <unit>... -- pick up a new binary after upgrade.
+#
+# dh_installsystemd runs with --no-stop-on-upgrade, so an upgrade can
+# leave the OLD daemon serving requests. Restarting only what was
+# already running fixes that without enabling or starting anything
+# that was stopped.
+#
+# This never enables face unlock: it touches service liveness only,
+# never the enabled flag, the config, or the PAM stack.
+for unit in "$@"; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        systemctl try-restart "$unit" || true
+    fi
+done

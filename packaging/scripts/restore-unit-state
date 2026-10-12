@@ -1,0 +1,15 @@
+#!/bin/sh
+# restore-unit-state <unit>... -- re-enable units prerm recorded.
+#
+# Consumes one flag file per unit: only units that were enabled when
+# prerm stopped them come back. Anything never flagged (admin turned
+# it off, fresh machine) is left alone. This never enables face
+# unlock itself, only the services; the feature flag stays off.
+RUNDIR=${RUNDIR:-/run/faceid-nim}
+for unit in "$@"; do
+    flag="$RUNDIR/was-enabled-$unit"
+    if [ -f "$flag" ]; then
+        systemctl enable --now "$unit" || true
+        rm -f "$flag" || true
+    fi
+done

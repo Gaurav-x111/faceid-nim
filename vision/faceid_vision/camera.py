@@ -226,7 +226,7 @@ class Camera:
                 if sample is not None and float(_np.mean(sample)) < 4.0:
                     log.warning(
                         "camera %s frames are near-black (mean<4): IR emitter "
-                        "may be off — see linux-enable-ir-emitter; "
+                        "may be off -- see 'faceid-nim ir-emitter --probe'; "
                         "hybrid will fall back to RGB cues", self.cfg.device)
             except Exception:
                 pass

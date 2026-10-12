@@ -99,14 +99,15 @@ class FaceGlyph extends St.DrawingArea {
         this._progress = 0;
         this._ramp = 0;
         this._failed = false;
-        this._face = 'apple';       // 'apple' (default) | 'arena' | 'classic'
+        this._face = 'iphone';    // 'iphone' (default) | 'apple' (same) | 'arena' | 'classic'
         this.connect('repaint', a => this._redraw(a));
     }
 
     /* Select which scan face to draw. Set by the pill from the user's
-     * config each scan: 'apple' (default iPhone-like) | 'arena' | 'classic'. */
+     * config each scan: 'iphone' (default iPhone-like) | 'apple' (same
+     * face, historic name) | 'arena' | 'classic'. */
     setScanFace(face) {
-        this._face = (face === 'classic' || face === 'arena') ? face : 'apple';
+        this._face = (face === 'classic' || face === 'arena') ? face : 'iphone';
     }
 
     /* phase: 'rays' | 'matched' | 'rejected'
@@ -161,7 +162,7 @@ class FaceGlyph extends St.DrawingArea {
             return;
         }
 
-        if (this._face === 'apple') {
+        if (this._face === 'apple' || this._face === 'iphone') {
             if (this._phase === 'matched')
                 this._drawAppleMatched(cr, cx, cy, S, thm);
             else

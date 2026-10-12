@@ -73,7 +73,7 @@ import { OpeningScene, animationsEnabled } from './opening.js';
 // (journal: "pill top-island v3 loaded"). The shell caches extension
 // modules, so a changed file with no marker is indistinguishable from
 // a stale cached copy when diagnosing position bugs remotely.
-try { log('faceid@nim: pill top-island v3 loaded (anim-switch)'); } catch (e) {}
+try { log('faceid@nim: pill top-island v4 loaded (glance-default)'); } catch (e) {}
 
 const TICK_MS = 16;
 
@@ -126,7 +126,7 @@ const FADE_MS = 650;          // HUD settles: dims, shrinks, fades (was 420)
 const SWEEP_MS = 2200;        // one full ray sweep while scanning (demo avg ~1.35-2.2s)
 
 const FAIL_CARD_AT_MS = 1400; // failure card enters after the shake (was 900)
-const REJECT_MS = 2600;       // shake + "Hover to try again" hold (was 1500)
+const REJECT_MS = 2600;       // shake + "Use your password" hold (was 1500)
 
 // Dynamic-Island notch geometry: the pill is a black capsule pinned to
 // the monitor top edge, horizontally centred -- never the screen centre.
@@ -176,9 +176,12 @@ class FaceIdPill extends St.Widget {
         this.add_child(this._glyph);
 
         // The opening splash is owned by OpeningScene; the HUD hosts its
-        // logo widget so it plays centred inside the scan square.
+        // logo widget so it plays centred inside the scan square, plus
+        // its video actor for the glance frame sequence (hidden unless
+        // the glance video is actually playing).
         this._opening = new OpeningScene();
         this.add_child(this._opening.widget);
+        this.add_child(this._opening.videoWidget);
 
         // Status line under the scanner.
         this._label = new St.Label({ style_class: 'faceid-status',
@@ -260,11 +263,11 @@ class FaceIdPill extends St.Widget {
         this._startMs = 0;
         this._welcomeStart = 0;
         this._progress = 0;
+        this._pendingVerify = false;
         this._reason = '';
         this._lastScanT = 0;
         this._rejectSweep = 0;
         this._ticker = 0;
-        this._retryHandler = null;
         this._loginContext = false;
 
         this.connect('enter-event', () => this._onEnter());
@@ -296,12 +299,14 @@ class FaceIdPill extends St.Widget {
         // drops mid-success and the check must not race it. A sudo/polkit
         // prompt in an unlocked session stays on "Verified".
         this._loginContext = this._detectLoginContext();
-        // User animation switch (app → Opening → Play animations).
+        // User animation switch (app → Settings → Appearance &
+        // Animation → Play animations).
         // Read live on every scan: toggling needs no reload. Off
         // behaves like reduced motion — result shows, motion collapses.
         try { this._animOff = !animationsEnabled(); }
         catch (e) { this._animOff = false; }
         this._reason = reason || '';
+        this._pendingVerify = false;
         this.translation_x = 0;     // clear any shake from a rejection
         this._show();
         if (this._state === 'opening' || this._state === 'scanning' ||
@@ -330,6 +335,18 @@ class FaceIdPill extends St.Widget {
         this._show();
         if (this._state === 'success' || this._state === 'rejected')
             return;
+        if (this._state === 'opening') {
+            // The splash has a minimum play time (OpeningScene.duration,
+            // the fade the user picked). A fast scan must not cut it off
+            // after one frame: hold the verifying progress and let the
+            // tick loop perform the handoff on time.
+            this._pendingVerify = true;
+            return;
+        }
+        this._enterVerifying();
+    }
+
+    _enterVerifying() {
         this._enter('verifying');
         this._opening.handoff(this);    // splash gone, glyph takes over
         this._glyph.visible = true;
@@ -338,6 +355,7 @@ class FaceIdPill extends St.Widget {
 
     showMatched(detail = null) {
         this._reason = detail || this._reason || '';
+        this._pendingVerify = false;
         this._show();
         this._opening.handoff(this);
         this._glyph.visible = true;
@@ -422,9 +440,10 @@ class FaceIdPill extends St.Widget {
     showRejected(reason = null) {
         this._rejectSweep = (GLib.get_monotonic_time() / 1000) % SWEEP_MS / SWEEP_MS;
         this._reason = reason || '';
+        this._pendingVerify = false;
         this._show();
         this._setClasses(false);
-        this._setLabel('Hover to try again');
+        this._setLabel('Use your password');
         this._enter('rejected');
     }
 
@@ -433,6 +452,7 @@ class FaceIdPill extends St.Widget {
         this._startMs = 0;
         this._welcomeStart = 0;
         this._progress = 0;
+        this._pendingVerify = false;
         this._setClasses(null); // idle: clear ok/fail tint
         this._setLabel('');
         this._card.visible = false;
@@ -480,10 +500,6 @@ class FaceIdPill extends St.Widget {
         this._stopClock();
     }
 
-    setRetryHandler(fn) {
-        this._retryHandler = fn;
-    }
-
     destroy() {
         if (this._a11yChangedId) {
             this._a11y.disconnect(this._a11yChangedId);
@@ -491,7 +507,6 @@ class FaceIdPill extends St.Widget {
         }
         this._a11y = null;
         this._stopClock();
-        this._retryHandler = null;
         super.destroy();
     }
 
@@ -554,8 +569,8 @@ class FaceIdPill extends St.Widget {
 
     _setLabel(text) {
         this._label.text = text || '';
-        this._cardSub.visible =
-            this._loginContext && this._state !== 'rejected';
+        this._cardSub.visible = this._loginContext &&
+            this._state !== 'rejected' && this._card.visible;
         // Centre the status line inside the island (not the glyph square).
         const [min, nat] = this._label.get_preferred_width(-1);
         const w = Math.max(nat, min);
@@ -579,12 +594,10 @@ class FaceIdPill extends St.Widget {
     }
 
     _onEnter() {
-        if (this._state === 'rejected') {
-            // Hover-to-retry: hand back to the daemon and rescan.
-            if (this._retryHandler)
-                this._retryHandler();
-            this.startScanning(this._reason || null);
-        }
+        // Listen-only: hovering a rejected scan must NOT rescan -- the
+        // old hover-to-retry fired a camera TestScan from the lock
+        // screen with no consent. The retry path is the password
+        // prompt, so a hover is a no-op by design.
     }
 
     _onLeave() { }
@@ -612,6 +625,14 @@ class FaceIdPill extends St.Widget {
         const lh = this._opening.widget.height;
         this._opening.widget.x = Math.round((ISLAND_W - lw) / 2);
         this._opening.widget.y = ISLAND_PAD_TOP + Math.round((GLYPH_SIZE - lh) / 2);
+
+        // Glance video frames play glyph-sized, centred in the same
+        // scan square (the frames are square; content scales to fit).
+        const vw = this._opening.videoWidget;
+        vw.width = GLYPH_SIZE;
+        vw.height = GLYPH_SIZE;
+        vw.x = Math.round((ISLAND_W - GLYPH_SIZE) / 2);
+        vw.y = ISLAND_PAD_TOP;
 
         // Centre the ✓ inside the circular success icon and the × inside
         // the failure icon (plain St.Widget children sit at 0,0).
@@ -714,10 +735,13 @@ class FaceIdPill extends St.Widget {
             this._glyph.animate({ phase: 'rays', scanT: 0, t: 0,
                                   progress: 0, ramp: 0, failed: false });
             if (sinceMs >= this._opening.duration()) {
-                this._state = 'scanning';
                 this._opening.handoff(this);
                 this._glyph.visible = true;
                 this._setLabel(SCAN_TEXT);
+                // A verifying signal that arrived mid-splash was held
+                // above; honour it now instead of dropping to scanning.
+                this._enter(this._pendingVerify ? 'verifying' : 'scanning');
+                this._pendingVerify = false;
             }
             break;
         }

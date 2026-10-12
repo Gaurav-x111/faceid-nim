@@ -14,8 +14,9 @@ On-disk layout:
     ~/.config/faceid-nim/openings/<id>/logo.svg
         optional per-variant assets
 
-Packages (".faceopen") are zips: opening.json + optional logo.svg +
-optional preview.svg.  "Publishing to GitHub" is simply exporting a
+Packages (".faceopen") are zips: opening.json + optional logo.svg /
+logo.png (only one is used; extra files are ignored, not executed).
+"Publishing to GitHub" is simply exporting a
 package and stashing it anywhere; friends install it by raw URL (the
 "Install from URL" path in the app) or from a file.
 """
@@ -50,22 +51,55 @@ def variant_dir(variant_id: str) -> str:
     return os.path.join(openings_dir(), _valid_id(variant_id))
 
 
+# -- glance video assets ------------------------------------------------
+# The glance opening is the real unlock video. The app previews it with
+# Gtk.Video straight from the mp4; the lock screen (which cannot play
+# video) uses the extracted PNG frame sequence shipped next to its
+# opening.js (see packaging/scripts/extract-glance-frames).
+
+_GLANCE_ASSET_DIRS = (
+    os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "linux-anim", "glance_anim", "assets")),
+    "/usr/share/faceid-nim/linux-anim/glance_anim/assets",
+    "/usr/share/glance-anim/assets",
+)
+
+GLANCE_CLIPS = {
+    "iphone": "unlockanimation.mp4",
+    "success": "unlockanimation.mp4",
+    "failure": "unsuccessfulunlockanimation.mp4",
+    "idle": "unlockstatic.png",
+}
+
+
+def glance_asset(name: str) -> str:
+    """Absolute path to a glance asset (mp4/png), or "" when missing."""
+    base = os.path.basename(name)
+    for d in _GLANCE_ASSET_DIRS:
+        p = os.path.join(d, base)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
 # -- schema -------------------------------------------------------------
 
 EASINGS = ["outCubic", "outBack", "outExpo"]
 
-# Which scan-face the unlock pill draws. "apple" is the default
-# smile-face scanner (thin track + progress arc + smiling face);
-# "arena" is the premium halo/crest scanner; "classic" is the original.
-SCAN_FACES = ["apple", "arena", "classic"]
-DEFAULT_SCAN_FACE = "apple"
+# Which scan-face the unlock pill draws. "iphone" is the default
+# iPhone-style scanner (thin track + progress arc + smiling face, the
+# same language as the iphone opening video); "apple" is its historical
+# name and renders identically; "arena" is the premium halo/crest
+# scanner; "classic" is the original.
+SCAN_FACES = ["iphone", "apple", "arena", "classic"]
+DEFAULT_SCAN_FACE = "iphone"
 
 BUILTIN = {
-    "glance": {
+    "iphone": {
         "kind": "builtin",
-        "name": "Glance Video Pill",
-        "description": "Spring pill with unlock videos (linux-anim) — "
-                       "the default opening animation.",
+        "name": "iPhone Video Pill",
+        "description": "The real unlock video, playing on the lock screen.",
     },
     "logo": {
         "kind": "builtin",
@@ -130,10 +164,18 @@ def _clean_spec(entry: dict) -> dict:
 # -- config -------------------------------------------------------------
 
 def default_config() -> dict:
-    return {"active": "glance", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
+    return {"active": "iphone", "variants": {}, "scan_face": DEFAULT_SCAN_FACE}
 
 
 def load() -> dict:
+    """Load openings.json, migrating legacy values.
+
+    Migrations (glance→iphone, unknown→iphone default, bad
+    scan_face→iphone) are written back when they change anything, so a
+    stale file cannot keep shadowing the in-memory state forever: the
+    app shows one thing while the lock screen (which reads the file)
+    plays another.
+    """
     cfg = default_config()
     try:
         with open(config_path(), "r", encoding="utf-8") as f:
@@ -147,10 +189,22 @@ def load() -> dict:
             k: _clean_spec(v) for k, v in variants.items()
             if isinstance(v, dict)
         }
-        active = str(data.get("active", "glance"))
-        cfg["active"] = active if active in all_ids(cfg) else "glance"
+        active = str(data.get("active", "iphone"))
+        if active == "glance":
+            active = "iphone"  # renamed; old configs migrate
+        cfg["active"] = active if active in all_ids(cfg) else "iphone"
         face = str(data.get("scan_face", DEFAULT_SCAN_FACE))
         cfg["scan_face"] = face if face in SCAN_FACES else DEFAULT_SCAN_FACE
+        # Write back when migration changed anything on disk: without
+        # this the file keeps a stale id (e.g. "glance") that the lock
+        # screen reads literally, while the app shows the migrated one.
+        try:
+            if (str(data.get("active", "iphone")) != cfg["active"]
+                    or str(data.get("scan_face", DEFAULT_SCAN_FACE))
+                    != cfg["scan_face"]):
+                save(cfg)
+        except Exception:
+            pass
     except (OSError, ValueError):
         pass
     return cfg
@@ -206,7 +260,7 @@ def remove_variant(cfg: dict, variant_id: str) -> bool:
         return False
     del cfg["variants"][variant_id]
     if cfg.get("active") == variant_id:
-        cfg["active"] = "glance"
+        cfg["active"] = "iphone"
     save(cfg)
     shutil.rmtree(variant_dir(variant_id), ignore_errors=True)
     return True
@@ -332,8 +386,12 @@ def export_package(cfg: dict, variant_id: str, dest_dir: str) -> str:
     return out
 
 
-def install_package(package_path: str) -> str:
-    """Validate a .faceopen zip, extract it and register the variant."""
+def install_package(package_path: str, overwrite: bool = False) -> str:
+    """Validate a .faceopen zip, extract it and register the variant.
+
+    Refuses to overwrite an existing custom variant unless
+    overwrite=True, so a same-id package cannot silently destroy the
+    user's variant (caller shows a confirm dialog first)."""
     real = os.path.realpath(package_path)
     if not os.path.isfile(real):
         raise ValueError("The file does not exist")
@@ -356,7 +414,9 @@ def install_package(package_path: str) -> str:
 
     try:
         meta = json.loads(z.read("opening.json"))
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, RuntimeError):
+        # RuntimeError: encrypted or otherwise unreadable entry --
+        # still just "not installable", never a traceback.
         z.close()
         raise ValueError("Package has no readable opening.json") from None
     if not isinstance(meta, dict):
@@ -367,6 +427,9 @@ def install_package(package_path: str) -> str:
     if not vid or vid in BUILTIN:
         z.close()
         raise ValueError("Package has no usable id")
+    if not overwrite and os.path.isdir(variant_dir(vid)):
+        z.close()
+        raise ValueError(f"“{vid}” already exists — confirm replace first")
 
     logo_name = None
     for n in names:
@@ -411,7 +474,16 @@ def install_package(package_path: str) -> str:
 
 
 def download(url: str) -> bytes:
-    """Fetch a URL with a size cap (never block the caller's intent)."""
+    """Fetch a URL with a size cap (never block the caller's intent).
+
+    Only http/https: the URL box takes arbitrary user input, and
+    urllib would otherwise happily fetch file://, ftp:// or data://
+    URLs too. Anything else is refused before any network or disk
+    access happens.
+    """
+    scheme = urllib.parse.urlsplit(str(url).strip()).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("Only http(s) animation URLs can be installed")
     req = urllib.request.Request(url, headers={"User-Agent": "faceid-nim/1"})
     with urllib.request.urlopen(req, timeout=25) as resp:
         data = resp.read(MAX_UNPACK_BYTES + 1)
@@ -420,7 +492,7 @@ def download(url: str) -> bytes:
     return data
 
 
-def download_and_install(url: str) -> str:
+def download_and_install(url: str, overwrite: bool = False) -> str:
     data = download(str(url).strip())
     if not data:
         raise ValueError("Empty download")
@@ -428,7 +500,7 @@ def download_and_install(url: str) -> str:
         f.write(data)
         tmp = f.name
     try:
-        return install_package(tmp)
+        return install_package(tmp, overwrite=overwrite)
     finally:
         try:
             os.unlink(tmp)

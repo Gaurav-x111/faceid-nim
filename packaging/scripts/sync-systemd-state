@@ -1,0 +1,16 @@
+#!/bin/sh
+# sync-systemd-state <unit>... -- re-sync debhelper's was-enabled record.
+#
+# `systemctl enable` by hand creates real symlinks but does not update
+# debhelper's was-enabled statefile; the next reinstall then takes the
+# was-enabled=false branch and strips the symlinks again, so units end
+# up disabled after every reinstall. Recording an already-enabled unit
+# changes bookkeeping only: it never enables or starts anything that
+# is off.
+for unit in "$@"; do
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper enable "$unit" >/dev/null || true
+        fi
+    fi
+done

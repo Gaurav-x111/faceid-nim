@@ -126,7 +126,7 @@ const FADE_MS = 650;          // HUD settles: dims, shrinks, fades (was 420)
 const SWEEP_MS = 2200;        // one full ray sweep while scanning (demo avg ~1.35-2.2s)
 
 const FAIL_CARD_AT_MS = 1400; // failure card enters after the shake (was 900)
-const REJECT_MS = 2600;       // shake + "Hover to try again" hold (was 1500)
+const REJECT_MS = 2600;       // shake + "Use your password" hold (was 1500)
 
 // Dynamic-Island notch geometry: the pill is a black capsule pinned to
 // the monitor top edge, horizontally centred -- never the screen centre.
@@ -176,9 +176,12 @@ class FaceIdPill extends St.Widget {
         this.add_child(this._glyph);
 
         // The opening splash is owned by OpeningScene; the HUD hosts its
-        // logo widget so it plays centred inside the scan square.
+        // logo widget so it plays centred inside the scan square, plus
+        // its video actor for the glance frame sequence (hidden unless
+        // the glance video is actually playing).
         this._opening = new OpeningScene();
         this.add_child(this._opening.widget);
+        this.add_child(this._opening.videoWidget);
 
         // Status line under the scanner.
         this._label = new St.Label({ style_class: 'faceid-status',
@@ -261,11 +264,17 @@ class FaceIdPill extends St.Widget {
         this._welcomeStart = 0;
         this._progress = 0;
         this._pendingVerify = false;
+        // Video-only wait: when the iphone glance video is actually
+        // playing, the splash doubles as the waiting indicator -- the
+        // clip holds its last frame until the verdict instead of handing
+        // off to the rings scanner, so an iphone choice shows exactly one
+        // animation (video, then the result card). Any other variant, or
+        // the reduced-motion logo fallback, keeps the rings wait.
+        this._videoHold = false;
         this._reason = '';
         this._lastScanT = 0;
         this._rejectSweep = 0;
         this._ticker = 0;
-        this._retryHandler = null;
         this._loginContext = false;
 
         this.connect('enter-event', () => this._onEnter());
@@ -292,12 +301,20 @@ class FaceIdPill extends St.Widget {
     // ---- public API ---------------------------------------------------
 
     startScanning(reason = null) {
+        // Audit 2026-10-06 (stale-card carryover): a new scan must never
+        // inherit _card/_failCard visibility, transforms, or glyph phase
+        // from a prior result. reset() is the complete scrub (cards
+        // hidden, transforms zeroed, glyph back to rays, clock stopped);
+        // _show() below then re-shows and restarts from idle, so every
+        // scan -- including hover-retry -- starts from a clean slate.
+        this.reset();
         // "Opening the laptop" -- the greeting only belongs to login and
         // lock-screen unlocks, captured *now* because the screen shield
         // drops mid-success and the check must not race it. A sudo/polkit
         // prompt in an unlocked session stays on "Verified".
         this._loginContext = this._detectLoginContext();
-        // User animation switch (app → Opening → Play animations).
+        // User animation switch (app → Settings → Appearance &
+        // Animation → Play animations).
         // Read live on every scan: toggling needs no reload. Off
         // behaves like reduced motion — result shows, motion collapses.
         try { this._animOff = !animationsEnabled(); }
@@ -325,6 +342,9 @@ class FaceIdPill extends St.Widget {
         this._setLabel('Opening camera…');
         this._glyph.visible = false;
         this._opening.enter(this);
+        // Decided here, not per tick: enter() is what probes the frames
+        // and the reduced-motion switch, so videoPlaying() is final now.
+        this._videoHold = this._opening.videoPlaying() === true;
     }
 
     setProgress(p) {
@@ -332,11 +352,11 @@ class FaceIdPill extends St.Widget {
         this._show();
         if (this._state === 'success' || this._state === 'rejected')
             return;
-        if (this._state === 'opening') {
-            // The splash has a minimum play time (OpeningScene.duration,
-            // the fade the user picked). A fast scan must not cut it off
-            // after one frame: hold the verifying progress and let the
-            // tick loop perform the handoff on time.
+        if (this._state === 'opening' || this._state === 'holding') {
+            // The splash (or its held last frame) has a minimum play time
+            // (OpeningScene.duration, the fade the user picked). A fast
+            // scan must not cut it off after one frame: hold the verifying
+            // progress and let the tick loop perform the handoff on time.
             this._pendingVerify = true;
             return;
         }
@@ -440,7 +460,7 @@ class FaceIdPill extends St.Widget {
         this._pendingVerify = false;
         this._show();
         this._setClasses(false);
-        this._setLabel('Hover to try again');
+        this._setLabel('Use your password');
         this._enter('rejected');
     }
 
@@ -450,6 +470,7 @@ class FaceIdPill extends St.Widget {
         this._welcomeStart = 0;
         this._progress = 0;
         this._pendingVerify = false;
+        this._videoHold = false;
         this._setClasses(null); // idle: clear ok/fail tint
         this._setLabel('');
         this._card.visible = false;
@@ -497,10 +518,6 @@ class FaceIdPill extends St.Widget {
         this._stopClock();
     }
 
-    setRetryHandler(fn) {
-        this._retryHandler = fn;
-    }
-
     destroy() {
         if (this._a11yChangedId) {
             this._a11y.disconnect(this._a11yChangedId);
@@ -508,7 +525,6 @@ class FaceIdPill extends St.Widget {
         }
         this._a11y = null;
         this._stopClock();
-        this._retryHandler = null;
         super.destroy();
     }
 
@@ -596,12 +612,10 @@ class FaceIdPill extends St.Widget {
     }
 
     _onEnter() {
-        if (this._state === 'rejected') {
-            // Hover-to-retry: hand back to the daemon and rescan.
-            if (this._retryHandler)
-                this._retryHandler();
-            this.startScanning(this._reason || null);
-        }
+        // Listen-only: hovering a rejected scan must NOT rescan -- the
+        // old hover-to-retry fired a camera TestScan from the lock
+        // screen with no consent. The retry path is the password
+        // prompt, so a hover is a no-op by design.
     }
 
     _onLeave() { }
@@ -629,6 +643,14 @@ class FaceIdPill extends St.Widget {
         const lh = this._opening.widget.height;
         this._opening.widget.x = Math.round((ISLAND_W - lw) / 2);
         this._opening.widget.y = ISLAND_PAD_TOP + Math.round((GLYPH_SIZE - lh) / 2);
+
+        // Glance video frames play glyph-sized, centred in the same
+        // scan square (the frames are square; content scales to fit).
+        const vw = this._opening.videoWidget;
+        vw.width = GLYPH_SIZE;
+        vw.height = GLYPH_SIZE;
+        vw.x = Math.round((ISLAND_W - GLYPH_SIZE) / 2);
+        vw.y = ISLAND_PAD_TOP;
 
         // Centre the ✓ inside the circular success icon and the × inside
         // the failure icon (plain St.Widget children sit at 0,0).
@@ -731,6 +753,16 @@ class FaceIdPill extends St.Widget {
             this._glyph.animate({ phase: 'rays', scanT: 0, t: 0,
                                   progress: 0, ramp: 0, failed: false });
             if (sinceMs >= this._opening.duration()) {
+                if (this._videoHold) {
+                    // Video-only wait: keep the held last frame on screen
+                    // and skip the rings scanner entirely. The verdict
+                    // (showMatched/showRejected) hands off to the result
+                    // card from here.
+                    this._setLabel(SCAN_TEXT);
+                    this._enter('holding');
+                    this._pendingVerify = false;
+                    break;
+                }
                 this._opening.handoff(this);
                 this._glyph.visible = true;
                 this._setLabel(SCAN_TEXT);
@@ -739,6 +771,15 @@ class FaceIdPill extends St.Widget {
                 this._enter(this._pendingVerify ? 'verifying' : 'scanning');
                 this._pendingVerify = false;
             }
+            break;
+        }
+
+        case 'holding': {
+            // The iphone clip's last frame stays up while the daemon
+            // decides; no rings, no second animation. tick() with a time
+            // past the clip length keeps painting the final frame.
+            this._welcomeTick();
+            this._opening.tick(this._opening.duration());
             break;
         }
 

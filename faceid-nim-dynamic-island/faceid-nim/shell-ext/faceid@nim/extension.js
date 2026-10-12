@@ -19,6 +19,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import { DaemonClient } from './dbusClient.js';
 import { FaceIdPill } from './pill.js';
+import { filterTerminal } from './scanGuard.js';
 
 export default class FaceIdExtension extends Extension {
     enable() {
@@ -27,8 +28,9 @@ export default class FaceIdExtension extends Extension {
         this._lockId = Main.screenShield?.connect?.('locked-changed',
             (_, locked) => this._onLocked(locked)) ?? 0;
 
-        // Hover-to-retry on a rejected scan hands back to the daemon.
-        this._pill.setRetryHandler(() => this._client?.retry());
+        // Listen-only: the client subscribes to ScanState and calls no
+        // daemon methods. There is deliberately no retry path here --
+        // on the lock screen the retry path is the password prompt.
         this._client.connect((state, progress, reason) =>
             this._onState(state, progress, reason));
 
@@ -60,12 +62,22 @@ export default class FaceIdExtension extends Extension {
         // the shield's curtain (the shield raises its lightbox above
         // everything when locking, and locked-changed fires afterwards).
         this._pill.reset();
+        this._lastTerminal = null;
         Main.uiGroup?.set_child_above_sibling?.(this._pill, null);
     }
 
     _onState(state, progress, reason) {
         try { log(`faceid@nim: ScanState ${state} ${progress} ${(reason || '').slice(0, 24)} visible=${this._pill?.visible} state=${this._pill?._state}`); } catch (e) {}
         if (!this._pill)
+            return;
+
+        // Terminal-state exclusivity (master audit 5F): two scans can
+        // overlap on the bus and a stale terminal must not overwrite a
+        // fresh one. Tested in shell-ext/tests/test-scan-guard.mjs.
+        // Display-only: PAM decisions never flow through here.
+        const f = filterTerminal(state, Date.now(), this._lastTerminal ?? null);
+        this._lastTerminal = f.last;
+        if (!f.show)
             return;
 
         switch (state) {

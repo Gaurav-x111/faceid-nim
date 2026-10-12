@@ -1,8 +1,8 @@
 # Opening animations
 
 Custom "Opening" animations for the faceid-nim lock-screen pill, made
-with the faceid-nim settings app (**Opening** page) and installed/stored
-per user at `~/.config/faceid-nim/openings/`.
+with the faceid-nim settings app (**Settings → Appearance & Animation**)
+and installed/stored per user at `~/.config/faceid-nim/openings/`.
 
 ## Security model
 
@@ -31,7 +31,7 @@ the logo. Nothing else is accepted.
 
 ## Making and sharing
 
-1. Open the app → **Opening** → **Create an opening animation**.
+1. Open the app → **Settings → Appearance & Animation** → **Create an opening animation**.
 2. Pick colours, headline, easing, duration, optional logo.
 3. Press **Publish to GitHub** — the app exports a `.faceopen` and
    gives you ready-to-run `gh` commands (gist or release).

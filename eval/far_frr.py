@@ -19,9 +19,13 @@ Two things this script refuses to pretend:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stats import rate_report  # noqa: E402
 
 
 def load(npz: Path):
@@ -143,8 +147,13 @@ def main() -> int:
                 f"extrapolation, not a measurement.")
         tau = tau_for_far(impostor, args.target_far)
         out(f"\ntau for target FAR {args.target_far:g}: **{tau:.4f}**")
-        out(f"  per-frame  FAR {far_at(impostor, tau)*100:.4f}%   "
-            f"FRR {frr_at(genuine, tau)*100:.2f}%")
+        # Honest rates with 95% Wilson CIs (finding 1E-2): below 30
+        # scores each, rate_report refuses instead of printing a
+        # percentage from a handful of frames.
+        k_far = int((impostor >= tau).sum())
+        k_frr = int((genuine < tau).sum())
+        out(f"  per-frame  FAR {rate_report(k_far, impostor.size)}   "
+            f"FRR {rate_report(k_frr, genuine.size)}")
         vf = voting_far(imp_by_group, tau, args.k, args.n)
         out(f"  {args.k}-of-{args.n} attempt FAR {vf*100:.4f}% "
             f"(resampled within impostor clips)")

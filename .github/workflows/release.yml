@@ -25,8 +25,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y
               libpam0g-dev meson ninja-build python3-venv devscripts debhelper
               build-essential
-      # The daemon needs rustc >= 1.75, which jammy's apt rustc (1.59) is
-      # not, and rustup does not register dpkg packages -- so
+      # The daemon needs rustc >= 1.85 (edition2024 crates in the
+      # lockfile), which jammy's apt rustc (1.59) is not, and rustup
+      # does not register dpkg packages -- so
       # dpkg-checkbuilddeps can never be satisfied here. Install the
       # toolchain the honest way and skip the (meaningless) check.
       - name: Install a current Rust toolchain

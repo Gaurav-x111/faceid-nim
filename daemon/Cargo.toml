@@ -2,7 +2,11 @@
 name = "faceid-nimd"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# Minimum is 1.85, not 1.75: the lockfile contains edition2024 crates
+# (zeroize_derive 1.5), which cargo < 1.85 cannot even parse. A stock
+# Ubuntu 24.04 apt toolchain (1.75) fails the build mid-dependency-fetch,
+# so keep this floor truthful and use rustup (see Makefile DEB_FLAGS).
+rust-version = "1.85"
 description = "Privileged face-unlock daemon for faceid-nim"
 license = "MIT OR Apache-2.0"
 

@@ -71,7 +71,7 @@ def test_source_checkout_layout(tmp_path):
     (app_dir.parent / "__init__.py").write_text("")
     shutil.copytree(VISION_SRC, tmp_path / "vision" / "faceid_vision")
 
-    r = _load_in_isolated(app_dir, None)
+    r = _load_in_isolated(app_dir, str(tmp_path))
     assert r.returncode == 0, r.stderr
     assert str(tmp_path / "vision" / "faceid_vision") in r.stdout, \
         f"resolved the wrong faceid_vision:\n{r.stdout}\n{r.stderr}"
@@ -137,7 +137,8 @@ def test_fallback_file_loader_registers_the_module(tmp_path):
     """)
     r = subprocess.run([sys.executable, "-I", "-c", code],
                        capture_output=True, text=True,
-                       env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+                       env={"PATH": "/usr/bin:/bin", "HOME": "/tmp",
+                            "FACEID_VISION_ROOTS": str(tmp_path / "nonexistent")},
                        cwd="/tmp")
     assert r.returncode == 0, r.stderr
     assert "faceid_vision_cameras_fallback" in r.stdout, r.stdout

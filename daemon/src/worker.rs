@@ -328,6 +328,10 @@ impl Worker {
                     spectrum,
                     luma,
                 } => {
+                    // H2: validate at daemon ingress. Malformed or
+                    // adversarial evidence is rejected before matching —
+                    // never normalized into an accepted sample.
+                    validate_scan_evidence(&embeddings, &liveness, &spectrum, luma)?;
                     return Ok(ScanEvidence {
                         embeddings,
                         model_id,
@@ -335,7 +339,7 @@ impl Worker {
                         usable: stats.map(|s| s.usable).unwrap_or(0),
                         spectrum,
                         luma,
-                    })
+                    });
                 }
                 Event::Error { reason } => return Err(anyhow!("worker: {reason}")),
                 Event::Preview { jpeg } => {
@@ -412,6 +416,76 @@ impl Worker {
     }
 }
 
+/// H2: validate worker evidence at daemon ingress.
+///
+/// Rejects malformed dimensions, non-finite values, invalid norms,
+/// excessive embedding counts, and malformed liveness values before
+/// matching. Never normalizes: a malformed sample is an error, not a
+/// match candidate.
+pub(crate) fn validate_scan_evidence(
+    embeddings: &[Vec<f32>],
+    liveness: &Liveness,
+    spectrum: &str,
+    luma: Option<f32>,
+) -> Result<()> {
+    const MAX_EMBEDDINGS: usize = 64;
+    const MAX_DIM: usize = 2048;
+    if embeddings.is_empty() || embeddings.len() > MAX_EMBEDDINGS {
+        return Err(anyhow!(
+            "worker sent {} embeddings (allowed 1..={})",
+            embeddings.len(),
+            MAX_EMBEDDINGS
+        ));
+    }
+    let dim = embeddings[0].len();
+    if dim == 0 || dim > MAX_DIM {
+        return Err(anyhow!("worker embedding dim {dim} out of range"));
+    }
+    for (i, e) in embeddings.iter().enumerate() {
+        if e.len() != dim {
+            return Err(anyhow!(
+                "worker embedding {i} dim {} != first dim {dim}",
+                e.len()
+            ));
+        }
+        let mut norm_sq = 0.0f64;
+        for v in e.iter() {
+            if !v.is_finite() {
+                return Err(anyhow!("worker embedding {i} has non-finite value"));
+            }
+            norm_sq += f64::from(*v) * f64::from(*v);
+        }
+        // Degenerate (all-zero) or explosive vectors carry no identity
+        // information; matching them would be guessing.
+        if !(1e-12 < norm_sq && norm_sq < 1e12) {
+            return Err(anyhow!("worker embedding {i} has invalid norm"));
+        }
+    }
+    for cue in liveness.deny.iter().chain(liveness.confirm.iter()) {
+        if cue.is_empty() || cue.len() > 64 {
+            return Err(anyhow!("malformed liveness cue"));
+        }
+        if !cue
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(anyhow!("malformed liveness cue"));
+        }
+    }
+    if !liveness.score.is_finite() {
+        return Err(anyhow!("malformed liveness score"));
+    }
+    match spectrum {
+        "" | "rgb" | "ir" | "unknown" => {}
+        _ => return Err(anyhow!("malformed spectrum")),
+    }
+    if let Some(l) = luma {
+        if !l.is_finite() || !(0.0..=255.0).contains(&l) {
+            return Err(anyhow!("malformed luma"));
+        }
+    }
+    Ok(())
+}
 /// Supervise the worker process, restarting it with backoff.
 ///
 /// A crashed worker must degrade to "password only", never to "any
@@ -435,5 +509,61 @@ pub async fn supervise(cmd: Vec<String>) {
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live() -> Liveness {
+        Liveness::default()
+    }
+
+    fn good_embeddings() -> Vec<Vec<f32>> {
+        vec![vec![0.5, -0.25, 0.75, 0.1]]
+    }
+
+    #[test]
+    fn accepts_well_formed_evidence() {
+        assert!(validate_scan_evidence(&good_embeddings(), &live(), "rgb", Some(120.0)).is_ok());
+        assert!(validate_scan_evidence(&good_embeddings(), &live(), "", None).is_ok());
+        assert!(validate_scan_evidence(&good_embeddings(), &live(), "unknown", None).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_and_excessive_counts() {
+        assert!(validate_scan_evidence(&[], &live(), "", None).is_err());
+        let many = vec![vec![0.5f32; 4]; 65];
+        assert!(validate_scan_evidence(&many, &live(), "", None).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_dimensions() {
+        assert!(validate_scan_evidence(&[vec![]], &live(), "", None).is_err());
+        let wide = vec![vec![0.1f32; 2049]];
+        assert!(validate_scan_evidence(&wide, &live(), "", None).is_err());
+        let ragged = vec![vec![0.5f32; 4], vec![0.5f32; 3]];
+        assert!(validate_scan_evidence(&ragged, &live(), "", None).is_err());
+    }
+
+    #[test]
+    fn rejects_non_finite_and_degenerate_norms() {
+        assert!(validate_scan_evidence(&[vec![f32::NAN, 0.1]], &live(), "", None).is_err());
+        assert!(validate_scan_evidence(&[vec![f32::INFINITY, 0.1]], &live(), "", None).is_err());
+        assert!(validate_scan_evidence(&[vec![0.0, 0.0]], &live(), "", None).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_liveness_spectrum_luma() {
+        let mut bad = live();
+        bad.deny = vec!["ok cue".into()];
+        assert!(validate_scan_evidence(&good_embeddings(), &bad, "", None).is_err());
+        let mut bad = live();
+        bad.score = f32::NAN;
+        assert!(validate_scan_evidence(&good_embeddings(), &bad, "", None).is_err());
+        assert!(validate_scan_evidence(&good_embeddings(), &live(), "xray", None).is_err());
+        assert!(validate_scan_evidence(&good_embeddings(), &live(), "", Some(999.0)).is_err());
+        assert!(validate_scan_evidence(&good_embeddings(), &live(), "", Some(f32::NAN)).is_err());
     }
 }

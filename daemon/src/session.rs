@@ -15,6 +15,7 @@ use crate::matcher::vote;
 use crate::policy::{Policy, Verdict};
 use crate::store::Store;
 use crate::worker::{Progress, Worker};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -80,6 +81,16 @@ pub struct Engine {
     /// Broadcast of (state, progress, reason) for the shell pill.
     pub state_tx: mpsc::Sender<(ScanState, f32, String)>,
     pub scan_slots: Arc<Semaphore>,
+    /// Per-uid serialization of whole attempts (option (a) of the
+    /// 2026-10-06 audit: one physical camera per machine, so same-user
+    /// attempts gain nothing from running concurrently, while concurrent
+    /// check-then-record let N parallel attempts each read a pre-lockout
+    /// counter and blow past max_failures). The guard is taken before
+    /// the policy check and held through record_success/record_failure,
+    /// so check -> scan -> record is atomic per uid. Different uids use
+    /// different locks and still run in parallel. Entries are kept
+    /// (one per uid ever seen); the map is bounded by the uid space.
+    pub auth_locks: Arc<Mutex<HashMap<u32, Arc<Mutex<()>>>>>,
 }
 
 impl Engine {
@@ -184,6 +195,22 @@ impl Engine {
                 return AuthOutcome::unavailable(Verdict::Disabled.user_message());
             }
         }
+        // Per-uid attempt lock (audit BLOCKER 1, option (a)): held
+        // from the policy check below through record_success /
+        // record_failure at the end of this function, so two
+        // concurrent attempts as the same uid cannot both pass check()
+        // before either records. Owned guard: 'static, lives until
+        // authenticate() returns. The map lock is released before
+        // taking the per-uid lock, so lock order is always map-then-uid
+        // and no deadlock is possible. Different uids take different
+        // locks and still run in parallel.
+        let _uid_guard = {
+            let uid_lock = {
+                let mut locks = self.auth_locks.lock().await;
+                locks.entry(uid).or_default().clone()
+            };
+            uid_lock.lock_owned().await
+        };
         {
             let mut pol = self.policy.lock().await;
             if pol.check(uid, cfg.max_failures) == Verdict::LockedOut {
@@ -199,6 +226,28 @@ impl Engine {
                 );
                 return AuthOutcome::deny(Verdict::LockedOut.user_message());
             }
+        }
+        // Nothing enrolled (or everything disabled): refuse BEFORE the
+        // camera ever opens. A scan with no templates to match can only
+        // waste power and confuse ("why is it scanning when I deleted
+        // my face?"). Falls through to the password like every other
+        // unavailable path, and never touches the failure counter.
+        // (Stale-model identities still scan: the running model_id is
+        // only known after the worker answers, and that path already
+        // refuses post-scan further below.)
+        if !self.store.any_enabled(uid) {
+            self.emit(ScanState::Rejected, 0.0, "").await;
+            log(
+                "refused",
+                "no_identities",
+                &no_cues,
+                cfg.strictness.as_str(),
+                None,
+                0,
+                "unknown",
+                None,
+            );
+            return AuthOutcome::unavailable(Verdict::NoIdentities.user_message());
         }
         let _scan_permit = match self.scan_slots.acquire().await {
             Ok(permit) => permit,
@@ -396,5 +445,374 @@ impl Engine {
         } else {
             "Face not recognised"
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::Audit;
+    use crate::config::Config;
+    use crate::store::Identity;
+    use std::time::Duration as StdDuration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const TEST_UID: u32 = 424242;
+    const TEST_MODEL: &str = "test-model";
+
+    /// Fake vision worker: answers every scan with a non-matching face
+    /// after a delay, so concurrent attempts overlap in the scan phase.
+    /// Without per-uid serialization every attempt passes the lockout
+    /// check before any of them records, and the counter overshoots.
+    async fn spawn_denying_worker(sock: std::path::PathBuf, delay: StdDuration) {
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind fake worker");
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (rd, mut wr) = stream.into_split();
+                    let mut lines = BufReader::new(rd).lines();
+                    // One request per connection; ignore what it says.
+                    let _ = lines.next_line().await;
+                    tokio::time::sleep(delay).await;
+                    let reply = serde_json::json!({
+                        "ev": "done",
+                        "embeddings": [[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+                        "model_id": TEST_MODEL,
+                        "liveness": {"deny": [], "confirm": [],
+                                      "attention_ok": true},
+                        "spectrum": "",
+                    });
+                    let _ = wr.write_all(format!("{reply}\n").as_bytes()).await;
+                });
+            }
+        });
+    }
+
+    /// Fake vision worker: answers every scan with a PERFECT face match
+    /// that carries a liveness veto. The daemon must still refuse: a
+    /// match must never override a spoof signal.
+    async fn spawn_vetoed_match_worker(sock: std::path::PathBuf) {
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind veto worker");
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (rd, mut wr) = stream.into_split();
+                    let mut lines = BufReader::new(rd).lines();
+                    let _ = lines.next_line().await;
+                    // [1,0,...]: cosine 1.0 against the enrolled
+                    // template, far above any tau -- accepted on
+                    // recognition, vetoed on liveness.
+                    let reply = serde_json::json!({
+                        "ev": "done",
+                        "embeddings": [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+                        "model_id": TEST_MODEL,
+                        "liveness": {"deny": ["moire"], "confirm": [],
+                                      "attention_ok": true},
+                        "spectrum": "",
+                    });
+                    let _ = wr.write_all(format!("{reply}\n").as_bytes()).await;
+                });
+            }
+        });
+    }
+
+    fn test_engine(sock: std::path::PathBuf, dir: &std::path::Path) -> Arc<Engine> {
+        let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
+        // Enrolled template [1,0,...]: cosine 0.0 against the worker's
+        // [0,1,...], far below tau, so every attempt is a clean no-match
+        // that must increment the failure counter exactly once.
+        let mut t = vec![0.0f32; 8];
+        t[0] = 1.0;
+        store
+            .save(
+                TEST_UID,
+                &Identity {
+                    name: "test".into(),
+                    model_id: TEST_MODEL.into(),
+                    enabled: true,
+                    templates: vec![t],
+                    spectra: vec![crate::store::SPECTRUM_ANY],
+                },
+            )
+            .expect("save test identity");
+        let cfg = Config {
+            enabled: true,
+            // Strictness off: liveness always passes, so the only failure
+            // path is the recognition no-match that records an attempt.
+            strictness: Strictness::Off,
+            tau: 0.9,
+            max_failures: 3,
+            lockout_secs: 60,
+            // Tests exercise the sudo path explicitly (H1 opt-in):
+            // production defaults no longer include it.
+            allowed_services: vec!["sudo".into()],
+            ..Config::default()
+        };
+        let audit = Arc::new(Audit::new(&dir.join("audit.log")));
+        let (state_tx, mut state_rx) = mpsc::channel(64);
+        // Drain pill broadcasts so a full channel never blocks a scan.
+        tokio::spawn(async move { while state_rx.recv().await.is_some() {} });
+        Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(cfg)),
+            store,
+            worker: Arc::new(Worker::new(sock)),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit,
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("faceid-lockout-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("test dir");
+        d
+    }
+
+    /// Audit BLOCKER 1 verification: max_failures + 2 concurrent
+    /// same-uid attempts against an always-denying worker must leave
+    /// exactly max_failures recorded, with the extras refused as
+    /// locked-out without consuming another scan-record.
+    #[tokio::test]
+    async fn concurrent_same_uid_attempts_lock_out_at_exactly_max_failures() {
+        let dir = test_dir("concurrent");
+        let sock = dir.join("vision.sock");
+        spawn_denying_worker(sock.clone(), StdDuration::from_millis(200)).await;
+        let engine = test_engine(sock, &dir);
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let e = engine.clone();
+            handles.push(tokio::spawn(async move {
+                e.authenticate(TEST_UID, "sudo").await
+            }));
+        }
+        let mut locked_out = 0;
+        let mut plain_fail = 0;
+        for h in handles {
+            let out = h.await.expect("attempt panicked");
+            assert!(!out.success, "denying worker must never authenticate");
+            if out.message == Verdict::LockedOut.user_message() {
+                locked_out += 1;
+            } else {
+                plain_fail += 1;
+            }
+        }
+        // Attempts 1-2 fail plainly, attempt 3 trips the lockout, and
+        // attempts 4-5 are refused at the check without recording again.
+        assert_eq!(plain_fail, 2, "exactly max_failures-1 plain failures");
+        assert_eq!(locked_out, 3, "trip + 2 refusals carry the lockout message");
+        assert_eq!(
+            engine.policy.lock().await.failures(TEST_UID),
+            3,
+            "counter must stop at exactly max_failures, not overshoot"
+        );
+        // The lockout is real: one more attempt is refused immediately.
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        assert!(!out.success);
+        assert_eq!(out.message, Verdict::LockedOut.user_message());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same-uid attempts also serialize when run back-to-back: the
+    /// counter still trips at exactly max_failures.
+    #[tokio::test]
+    async fn sequential_attempts_lock_out_at_max_failures() {
+        let dir = test_dir("sequential");
+        let sock = dir.join("vision.sock");
+        spawn_denying_worker(sock.clone(), StdDuration::from_millis(10)).await;
+        let engine = test_engine(sock, &dir);
+
+        for _ in 0..3 {
+            let out = engine.authenticate(TEST_UID, "sudo").await;
+            assert!(!out.success);
+        }
+        assert_eq!(engine.policy.lock().await.failures(TEST_UID), 3);
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        assert_eq!(out.message, Verdict::LockedOut.user_message());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fake worker that dies mid-scan: accepts the connection, reads
+    /// the request, then closes without a reply (what SIGKILL looks
+    /// like from the daemon side).
+    async fn spawn_dying_worker(sock: std::path::PathBuf) {
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind dying worker");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (rd, _wr) = stream.into_split();
+                    let mut lines = BufReader::new(rd).lines();
+                    let _ = lines.next_line().await;
+                    tokio::time::sleep(StdDuration::from_millis(100)).await;
+                    // Drop without replying: connection closed mid-scan.
+                });
+            }
+        });
+    }
+
+    /// Audit HIGH 2 verification (daemon half): a worker killed
+    /// mid-scan must surface as UNAVAILABLE (fall through to
+    /// password), never as success, inside the PAM deadline -- and a
+    /// dead worker must not consume a lockout attempt.
+    #[tokio::test]
+    async fn worker_killed_mid_scan_is_unavailable_not_a_failure() {
+        let dir = test_dir("dying");
+        let sock = dir.join("vision.sock");
+        spawn_dying_worker(sock.clone()).await;
+        let engine = test_engine(sock, &dir);
+        // Short scan so the test does not wait out the 4 s default.
+        engine.cfg.lock().await.scan_timeout_ms = 500;
+
+        let start = std::time::Instant::now();
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        let elapsed = start.elapsed();
+
+        assert!(!out.success, "a dead worker must never authenticate");
+        assert!(
+            out.unavailable,
+            "worker death must be UNAVAIL (password fall-through), got {:?}",
+            out.message,
+        );
+        assert!(
+            elapsed < StdDuration::from_secs(8),
+            "fall-through must land inside the 8 s PAM deadline, took {elapsed:?}",
+        );
+        assert_eq!(
+            engine.policy.lock().await.failures(TEST_UID),
+            0,
+            "a dead worker is not a failed attempt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No enrollments: the daemon must refuse WITHOUT opening the
+    /// camera ("deleted my face and it still scans"). The worker
+    /// socket here is bogus on purpose: any scan attempt would fail
+    /// as a camera/worker error, so a clean no_identities refusal
+    /// proves no scan was attempted. The failure counter stays at 0.
+    #[tokio::test]
+    async fn no_enrollments_refuses_without_scanning() {
+        let dir = test_dir("empty-store");
+        let sock = dir.join("no-worker.sock");
+        let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
+        let cfg = Config {
+            enabled: true,
+            // H1 opt-in: production defaults exclude sudo; tests that
+            // exercise the sudo path allow it explicitly.
+            allowed_services: vec!["sudo".into()],
+            ..Config::default()
+        };
+        let audit = Arc::new(Audit::new(&dir.join("audit.log")));
+        let (state_tx, mut state_rx) = mpsc::channel(64);
+        tokio::spawn(async move { while state_rx.recv().await.is_some() {} });
+        let engine = Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(cfg)),
+            store,
+            worker: Arc::new(Worker::new(sock)),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit,
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        assert!(!out.success);
+        assert!(out.unavailable, "must fall through to password");
+        assert_eq!(out.message, Verdict::NoIdentities.user_message());
+        assert_eq!(engine.policy.lock().await.failures(TEST_UID), 0);
+        let log = std::fs::read_to_string(dir.join("audit.log")).expect("audit written");
+        assert!(log.contains("no_identities"), "audit must show {log}");
+        assert!(
+            !log.to_lowercase().contains("camera") && !log.to_lowercase().contains("worker"),
+            "no camera/worker error may appear: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A perfect face match carrying a liveness veto must still be
+    /// refused -- and it counts as a failed attempt (the face was
+    /// judged, not unavailable). This is the core invariant of the
+    /// whole daemon; the test pins it against a worker that matches
+    /// with cosine 1.0 while reporting a moire spoof cue.
+    #[tokio::test]
+    async fn perfect_match_with_liveness_veto_is_denied() {
+        let dir = test_dir("vetoed-match");
+        let sock = dir.join("vision.sock");
+        spawn_vetoed_match_worker(sock.clone()).await;
+        let store = Arc::new(Store::open(&dir.join("store")).expect("open test store"));
+        let mut t = vec![0.0f32; 8];
+        t[0] = 1.0;
+        store
+            .save(
+                TEST_UID,
+                &Identity {
+                    name: "test".into(),
+                    model_id: TEST_MODEL.into(),
+                    enabled: true,
+                    templates: vec![t],
+                    spectra: vec![crate::store::SPECTRUM_ANY],
+                },
+            )
+            .expect("save test identity");
+        let cfg = Config {
+            enabled: true,
+            strictness: Strictness::Light,
+            tau: 0.9,
+            // 1-of-1 voting: the single matching embedding IS accepted
+            // on recognition, so liveness is the ONLY thing standing
+            // between this scan and an unlock. If the veto ever stops
+            // working, this test authenticates -- and fails loudly.
+            vote_k: 1,
+            vote_n: 1,
+            max_failures: 5,
+            lockout_secs: 60,
+            // H1 opt-in: production defaults exclude sudo.
+            allowed_services: vec!["sudo".into()],
+            ..Config::default()
+        };
+        let audit = Arc::new(Audit::new(&dir.join("audit.log")));
+        let (state_tx, mut state_rx) = mpsc::channel(64);
+        tokio::spawn(async move { while state_rx.recv().await.is_some() {} });
+        let engine = Arc::new(Engine {
+            cfg: Arc::new(Mutex::new(cfg)),
+            store,
+            worker: Arc::new(Worker::new(sock)),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            audit,
+            state_tx,
+            scan_slots: Arc::new(Semaphore::new(2)),
+            auth_locks: Arc::new(Mutex::new(HashMap::new())),
+        });
+
+        let out = engine.authenticate(TEST_UID, "sudo").await;
+        assert!(!out.success, "a vetoed match must never authenticate");
+        assert!(!out.unavailable, "a judged face is a denial, not unavail");
+        assert_eq!(out.message, "Face not recognised");
+        assert_eq!(
+            engine.policy.lock().await.failures(TEST_UID),
+            1,
+            "a vetoed match records exactly one failed attempt"
+        );
+        let log = std::fs::read_to_string(dir.join("audit.log")).expect("audit written");
+        assert!(
+            log.contains("liveness_deny:moire"),
+            "audit must carry the veto detail: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -22,6 +22,21 @@
 | daemon → UI | D-Bus signal carrying `(state, progress, reason)` | The extension is untrusted. It gets no frames, embeddings or scores. |
 | app → daemon | polkit (`daemon/src/authz.rs`, called from every write in `dbus.rs` and `enroll.rs`) | Enrolling must require the account password. |
 
+## Settings are global, not per-user (1B-4)
+
+`SetSettings` is gated on `org.faceidnim.settings` (`auth_self`), but
+the settings it writes -- `tau`, `mode`, `allowed_services`,
+`exclude_users`, strictness -- apply machine-wide. Any ONE
+authenticated active user can therefore change the unlock policy for
+every account on the machine (e.g. lower `tau`, or add another user to
+`exclude_users`). That is acceptable for a single-user laptop, which is
+what this release targets, but take note on a multi-user machine: there
+is no per-user settings scope and no admin-only role. Path fields
+(`data_dir`, sockets, log paths) are stripped server-side
+(`daemon/src/dbus.rs`, `set_settings`) so a caller cannot redirect the
+template store, and out-of-range values are clamped fail-closed
+(`daemon/src/config.rs`, `validate`).
+
 ## State machine
 
 ```
@@ -49,3 +64,17 @@ if m.accepted && liveness_ok { /* unlock */ }
 The ordering matters less than the independence. `vote()` never sees a
 liveness cue and the liveness fusion never sees a similarity score, so
 neither can be talked into excusing the other.
+
+## App navigation & preview (2026-10)
+
+Sidebar order: Overview, Identities, Cameras, Security, Settings,
+Diagnostics, plus a separated `GitHub ↗` link (system browser, no
+startup network, `open_url()` in `app/faceid_app/main.py` — no update
+checker; deferred by design). Animation customization lives under
+Settings → Appearance & Animation (the former top-level Opening page
+was migrated; `openings.json` ids/values unchanged).
+
+Preview is Cairo + `Gtk.Video`, not WebKit/HTML: canonical states
+`scanning|recognized|denied` map from `ScanState` via
+`SCAN_STATE_TO_PREVIEW` and resolve the **selected** variant's own
+assets. Full pipeline: `docs/animation-pipeline.md`.

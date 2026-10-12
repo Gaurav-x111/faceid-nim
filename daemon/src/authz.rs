@@ -6,6 +6,13 @@ use zbus::{proxy, Connection};
 
 pub const ACTION_ENROLL: &str = "org.faceidnim.enroll";
 pub const ACTION_SETTINGS: &str = "org.faceidnim.settings";
+/// Security-sensitive settings (enabled, threshold, strictness, vote
+/// counts, allowed services, lockout policy) need an admin password.
+/// Cosmetic settings (camera mode label, timeline toggle display, …)
+/// stay on ACTION_SETTINGS (auth_self). SetSettings refuses to smuggle
+/// a protected key through the weaker action: see
+/// protected_settings_changed() in config.rs.
+pub const ACTION_SETTINGS_SECURE: &str = "org.faceidnim.settings-secure";
 pub const ACTION_DELETE: &str = "org.faceidnim.delete";
 pub const ACTION_ENABLE: &str = "org.faceidnim.enable";
 /// Watching the camera is reading a sensor in the user's room, so the
@@ -13,6 +20,11 @@ pub const ACTION_ENABLE: &str = "org.faceidnim.enable";
 /// (Round-2 audit: StartPreview handed camera JPEGs to any local
 /// caller with only a uid check.)
 pub const ACTION_PREVIEW: &str = "org.faceidnim.preview";
+/// A diagnostic scan still opens the camera, so it needs a polkit
+/// decision -- but `allow_active = yes` (no password prompt) so the
+/// Test button stays smooth. Remote and inactive sessions are denied:
+/// the camera must not open for someone not at this machine.
+pub const ACTION_TEST: &str = "org.faceidnim.test";
 
 type PolkitSubject = (String, HashMap<String, OwnedValue>);
 type AuthzResult = zbus::Result<(bool, bool, HashMap<String, String>)>;
@@ -83,17 +95,21 @@ mod tests {
     fn action_ids_match_installed_policy() {
         assert_eq!(ACTION_ENROLL, "org.faceidnim.enroll");
         assert_eq!(ACTION_SETTINGS, "org.faceidnim.settings");
+        assert_eq!(ACTION_SETTINGS_SECURE, "org.faceidnim.settings-secure");
         assert_eq!(ACTION_DELETE, "org.faceidnim.delete");
         assert_eq!(ACTION_ENABLE, "org.faceidnim.enable");
         assert_eq!(ACTION_PREVIEW, "org.faceidnim.preview");
+        assert_eq!(ACTION_TEST, "org.faceidnim.test");
         let policy = std::fs::read_to_string("../packaging/polkit/org.faceidnim.policy")
             .expect("installed polkit policy");
         for action in [
             ACTION_ENROLL,
             ACTION_SETTINGS,
+            ACTION_SETTINGS_SECURE,
             ACTION_DELETE,
             ACTION_ENABLE,
             ACTION_PREVIEW,
+            ACTION_TEST,
         ] {
             assert!(policy.contains(&format!("action id=\"{action}\"")));
         }
@@ -107,8 +123,168 @@ mod tests {
             "DeleteIdentity",
             "DeleteAllData",
             "Enroll",
+            "TestScan",
+            "PreviewAnimation",
         ] {
             assert!(bus.contains(&format!("send_member=\"{member}\"")));
         }
+        // 1B-3 regression: the Enrollment1 interface must be an
+        // enumerated member list, never a blanket interface allow --
+        // a blanket allow silently exposes every future method added
+        // to the interface. Allow elements span lines, so scan element
+        // by element rather than line by line.
+        for member in [
+            "ListPoses",
+            "StartEnrollment",
+            "EnrollPose",
+            "FinishEnrollment",
+            "CancelEnrollment",
+            "GetSessionInfo",
+        ] {
+            assert!(
+                bus.contains(&format!("send_member=\"{member}\"")),
+                "Enrollment1 member {member} must be explicitly allowed"
+            );
+        }
+        let mut idx = 0;
+        let mut enumerated = 0;
+        while let Some(pos) = bus[idx..].find("send_interface=\"org.faceidnim.Enrollment1\"") {
+            let abs_pos = idx + pos;
+            let elem_start = bus[..abs_pos].rfind("<allow").expect("allow element");
+            let elem_end = bus[abs_pos..].find('>').expect("element end") + abs_pos;
+            let elem = &bus[elem_start..=elem_end];
+            assert!(
+                elem.contains("send_member="),
+                "blanket Enrollment1 allow (no send_member): {elem}"
+            );
+            enumerated += 1;
+            idx = elem_end + 1;
+        }
+        assert_eq!(enumerated, 6, "expected 6 enumerated Enrollment1 members");
+    }
+
+    /// 1B-2 regression: the TestScan action must stay promptless for
+    /// the local active session but closed for remote/inactive ones.
+    /// `auth_self` here would password-prompt every Test-button click;
+    /// `yes` for inactive/any would open the camera for sessions not
+    /// at this machine.
+    #[test]
+    fn test_action_is_promptless_local_only() {
+        let policy = std::fs::read_to_string("../packaging/polkit/org.faceidnim.policy")
+            .expect("installed polkit policy");
+        let start = policy
+            .find("action id=\"org.faceidnim.test\"")
+            .expect("test action present");
+        let block = &policy[start..];
+        let end = block.find("</action>").expect("test action closed");
+        let block = &block[..end];
+        assert!(block.contains("<allow_any>no</allow_any>"), "remote: no");
+        assert!(
+            block.contains("<allow_inactive>no</allow_inactive>"),
+            "inactive: no"
+        );
+        assert!(
+            block.contains("<allow_active>yes</allow_active>"),
+            "active: yes"
+        );
+    }
+
+    /// H3/O1/O5 + H9 tiers: secure settings and PAM enablement need
+    /// auth_admin; deletion needs auth_self (never promptless); plain
+    /// settings stay auth_self for cosmetic keys.
+    #[test]
+    fn privileged_actions_require_admin_and_delete_needs_self() {
+        let policy = std::fs::read_to_string("../packaging/polkit/org.faceidnim.policy")
+            .expect("installed polkit policy");
+        let block_for = |id: &str| -> String {
+            let start = policy
+                .find(&format!("action id=\"{id}\""))
+                .expect("action present");
+            let block = &policy[start..];
+            let end = block.find("</action>").expect("action closed");
+            block[..end].to_string()
+        };
+        let secure = block_for(ACTION_SETTINGS_SECURE);
+        assert!(
+            secure.contains("<allow_active>auth_admin</allow_active>"),
+            "settings-secure: auth_admin"
+        );
+        assert!(secure.contains("<allow_any>no</allow_any>"));
+        assert!(secure.contains("<allow_inactive>no</allow_inactive>"));
+        let delete = block_for(ACTION_DELETE);
+        assert!(
+            delete.contains("<allow_active>auth_self</allow_active>"),
+            "delete: auth_self, not yes"
+        );
+        let enable = block_for(ACTION_ENABLE);
+        assert!(
+            enable.contains("<allow_active>auth_admin</allow_active>"),
+            "enable: auth_admin"
+        );
+        let settings = block_for(ACTION_SETTINGS);
+        assert!(
+            settings.contains("<allow_active>auth_self</allow_active>"),
+            "settings stays auth_self"
+        );
+    }
+
+    /// Master-audit registration check: every D-Bus method implemented
+    /// on Enrollment1 in src/enroll.rs must be enumerated in the bus
+    /// policy tested above -- a method that exists in code but is
+    /// missing from the policy is either unreachable (dead) or
+    /// reachable without an explicit allow (policy hole). Helpers and
+    /// the EnrollProgress signal are not method calls and are excluded.
+    #[test]
+    fn enrollment_methods_match_bus_policy() {
+        let src = std::fs::read_to_string("src/enroll.rs").expect("enroll.rs source");
+        let mut methods = std::collections::BTreeSet::new();
+        for line in src.lines() {
+            let line = line.trim();
+            let rest = match line.strip_prefix("async fn ") {
+                Some(r) => r,
+                None => continue,
+            };
+            // Strip generic params: with_session<T> is one helper.
+            let name: String = rest
+                .chars()
+                .take_while(|c| *c != '(' && *c != '<')
+                .collect();
+            match name.as_str() {
+                // Internal helpers, not D-Bus methods. A new helper
+                // added here must be classified in this list, or the
+                // test fails until it is -- that is the point.
+                "caller_uid"
+                | "with_session"
+                | "next_session_id"
+                | "deliver_preview_map"
+                | "deliver_guidance_map" => continue,
+                // A signal, not a method call.
+                "enroll_progress" => continue,
+                _ => {}
+            }
+            let pascal: String = name
+                .split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    match c.next() {
+                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect();
+            methods.insert(pascal);
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "ListPoses",
+            "StartEnrollment",
+            "EnrollPose",
+            "FinishEnrollment",
+            "CancelEnrollment",
+            "GetSessionInfo",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(methods, expected, "enroll.rs methods vs bus policy");
     }
 }

@@ -159,15 +159,23 @@ echo
 # 9. IR emitter
 echo "IR emitter:"
 if command -v linux-enable-ir-emitter &>/dev/null; then
-    echo "  linux-enable-ir-emitter: installed"
+    echo "  linux-enable-ir-emitter: present (third-party; driving the LEDs stays vendor-specific)"
 else
-    echo "  linux-enable-ir-emitter: NOT installed (passive IR only)"
-    echo "  sudo apt install linux-enable-ir-emitter, then: sudo faceid-nim ir-emitter --enable"
+    # No install hint on purpose: the tool is not packaged for Ubuntu.
+    echo "  linux-enable-ir-emitter: absent (not in Ubuntu apt; passive IR only)"
+    echo "  see: sudo faceid-nim ir-emitter --probe"
 fi
 if command -v v4l2-ctl &>/dev/null; then
+    # IR == mono formats and NO colour formats. GREY alone is not
+    # evidence: a v4l2loopback node enumerates everything including GREY.
     for dev in /dev/video*; do
-        if [[ -c "$dev" ]] && v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null | grep -q GREY; then
-            echo "  $dev: advertises GREY (IR-capable?)"
+        if [[ -c "$dev" ]]; then
+            fmts="$(v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null || true)"
+            if [[ -n "$fmts" ]] \
+                && grep -Eq "'(GREY|Y8 |Y1[0246]|Y8I|Y1[0246]I|Z1[46])'" <<<"$fmts" \
+                && ! grep -Eq "'(MJPG|JPEG|YUYV|YV12|NV1[12]|BGR.?|RGB.?|H264|VP[89])'" <<<"$fmts"; then
+                echo "  $dev: mono-only (likely a real IR sensor)"
+            fi
         fi
     done
 fi

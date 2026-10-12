@@ -208,12 +208,70 @@ CFG
     # --- services -----------------------------------------------------
     systemctl daemon-reload || true
     systemctl enable --now faceid-nim-fetch-models.service || true
-    systemctl enable --now faceid-nimd.service || true
-    systemctl enable --now faceid-vision.service || true
+    # Restore units prerm recorded as previously enabled: a reinstall
+    # passes through prerm's disable, and without this the units stay
+    # off (restart-if-active only restarts *running* units, and the
+    # was-enabled record below only covers debhelper bookkeeping).
+    # Flags are consumed either way, so a stale flag can never
+    # re-enable a unit the admin turned off afterwards.
+    [ -x "$LIBEXEC/restore-unit-state" ] \
+        && "$LIBEXEC/restore-unit-state" \
+            faceid-nimd.service faceid-vision.service || true
+    if [ -n "${2:-}" ]; then
+        # Upgrade ($2 is the previously installed version):
+        # dh_installsystemd runs with --no-stop-on-upgrade, so the OLD
+        # daemon may still be serving requests. Restart what was
+        # already running so the new binary takes over; stopped units
+        # stay stopped. This never enables face unlock.
+        [ -x "$LIBEXEC/restart-if-active" ] \
+            && "$LIBEXEC/restart-if-active" \
+                faceid-nimd.service faceid-vision.service || true
+    else
+        systemctl enable --now faceid-nimd.service || true
+        systemctl enable --now faceid-vision.service || true
+    fi
+
+    # --- polkit -------------------------------------------------------
+    # polkitd reads action files at startup and does not reliably
+    # re-read them, so an action installed by an upgrade would
+    # otherwise stay unregistered and its authorization checks would
+    # fail on machines that should pass (seen live: org.faceidnim.test
+    # missing from pkaction while present on disk). Restarting polkitd
+    # is safe: it drops no sessions and changes no authentication
+    # configuration; try-restart leaves a stopped polkit alone.
+    systemctl try-restart polkit.service || true
+
+    # --- debhelper state sync --------------------------------------
+    # Must run before the generated maintainer-script blocks at the
+    # end of this file: a unit enabled by hand has real symlinks but a
+    # stale was-enabled=false record, and those blocks would strip the
+    # symlinks again on this very install. Syncing records reality
+    # without enabling anything new.
+    [ -x "$LIBEXEC/sync-systemd-state" ] \
+        && "$LIBEXEC/sync-systemd-state" \
+            faceid-nimd.service faceid-vision.service || true
+
+    # Report the configured state truthfully: a fresh install is
+    # always disabled (config written above with enabled=false), but a
+    # reinstall/upgrade preserves the existing config, so claiming
+    # DISABLED unconditionally contradicts `faceid-nim status` when the
+    # user already opted in. Read the live flag instead.
+    _ENABLED="false"
+    if [ -r /etc/faceid-nim/config.toml ]; then
+        _ENABLED="$(awk '$0 ~ /^[[:space:]]*enabled[[:space:]]*=/ \
+            { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/[";]/, ""); \
+              sub(/[[:space:]]*#.*$/, ""); print; exit }' \
+            /etc/faceid-nim/config.toml 2>/dev/null || echo false)"
+    fi
+    if [ "$_ENABLED" = "true" ]; then
+        _STATE_LINE="faceid-nim installed. Face unlock is ENABLED (per /etc/faceid-nim/config.toml)."
+    else
+        _STATE_LINE="faceid-nim installed. Face unlock is DISABLED (fresh installs stay off until you opt in)."
+    fi
 
     cat <<MSG
 
-faceid-nim installed. Face unlock is DISABLED.
+$_STATE_LINE
 
   $MODELS_LINE
   $LIVE

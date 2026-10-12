@@ -9,6 +9,7 @@
 //! is what stops someone at your unlocked laptop enrolling their own
 //! face onto your account.
 
+use crate::audit::Event;
 use crate::authz;
 use crate::config::{Config, Strictness};
 use crate::matcher::vote;
@@ -37,6 +38,10 @@ pub struct Daemon1 {
     previews: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Monotonic id source for preview session names.
     preview_counter: Arc<Mutex<u64>>,
+    /// Per-uid TestScan throttle (1B-2). A looping caller must not hold
+    /// the camera continuously; a refusal here never touches the face
+    /// unlock lockout counter.
+    test_scans: Arc<Mutex<TestScanLimiter>>,
 }
 
 impl Daemon1 {
@@ -65,6 +70,7 @@ impl Daemon1 {
             conn,
             previews: Arc::new(Mutex::new(HashMap::new())),
             preview_counter: Arc::new(Mutex::new(0)),
+            test_scans: Arc::new(Mutex::new(TestScanLimiter::default())),
         }
     }
 }
@@ -278,17 +284,73 @@ impl Daemon1 {
     /// never touch the failure counter or the PAM decision path. It
     /// runs the SAME pipeline as a real unlock (same mode, strictness,
     /// attention and challenge settings) and judges the evidence with
-    /// the same liveness rule as session.rs, so a "recognized" here
+    /// the same liveness rule as session.rs, so a "recognised" here
     /// means an unlock would succeed too. It still drives the pill's
     /// ScanState (waking → searching → verifying with live progress,
     /// then matched or rejected), so the whole success sequence plays
     /// from the settings app exactly as it does at a real unlock —
     /// the only difference is that nothing was unlocked.
+    ///
+    /// 1B-2 hardening: at most one call per uid per
+    /// TEST_SCAN_MIN_INTERVAL (a looping process must not hold the
+    /// camera); a polkit decision on org.faceidnim.test
+    /// (promptless for the local active session, denied for
+    /// remote/inactive ones); and caller-facing answers in four
+    /// coarse strings only, with the detailed reason kept in the
+    /// audit log (SECURITY.md invariant 2).
     async fn test_scan(
         &self,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(bool, String)> {
         let uid = self.caller_uid(&hdr).await?;
+        // Throttle first (outermost): cheap, no bus round-trip, and a
+        // refusal here never touches the lockout counter.
+        {
+            let mut lim = self.test_scans.lock().await;
+            if !lim.allow(uid, std::time::Instant::now()) {
+                return Err(zbus::fdo::Error::Failed(
+                    "test scan rate limited; wait a moment and try again".into(),
+                ));
+            }
+        }
+        // The camera must not open for a session that is not at this
+        // machine. Promptless locally (allow_active=yes), so the Test
+        // button stays smooth.
+        authz::require_polkit(&self.conn, &hdr, authz::ACTION_TEST).await?;
+        let t0 = std::time::Instant::now();
+        let no_cues: Vec<String> = Vec::new();
+        let audit = self.engine.audit.clone();
+        // Detail goes here (root-only log), never to the caller.
+        let log_test = |result: &str,
+                        reason: &str,
+                        cues: &[String],
+                        strict: &str,
+                        notes: Option<&serde_json::Map<String, serde_json::Value>>,
+                        valid: u64,
+                        spectrum: &str,
+                        luma: Option<f32>| {
+            let moire = |key: &str| {
+                notes
+                    .and_then(|m| m.get(key))
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as f32)
+            };
+            audit.log(Event {
+                ts: 0,
+                uid,
+                service: "test-scan",
+                result,
+                reason,
+                elapsed_ms: t0.elapsed().as_millis() as u64,
+                strictness: strict,
+                deny_cues: cues,
+                moire_score: moire("moire"),
+                moire_threshold: moire("moire_threshold"),
+                valid_frames: (valid > 0).then_some(valid),
+                spectrum,
+                luma,
+            });
+        };
         let cfg = self.cfg.lock().await.clone();
         // Diagnostic scans consume the same camera/worker as real
         // unlocks, so they wait in the same queue: otherwise any local
@@ -301,6 +363,25 @@ impl Daemon1 {
             .await
             .map_err(|_| zbus::fdo::Error::Failed("scan slots unavailable".into()))?;
         let stx = self.engine.state_tx.clone();
+
+        // Nothing enrolled (or everything disabled): answer "not
+        // recognised" without opening the camera -- there is nothing
+        // a scan could match. Detail goes to the audit log as usual.
+        if !self.store.any_enabled(uid) {
+            let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
+            log_test(
+                "test",
+                "no_identities_enrolled",
+                &no_cues,
+                cfg.strictness.as_str(),
+                None,
+                0,
+                "unknown",
+                None,
+            );
+            let (ok, coarse) = coarse_test_outcome(false, true, true);
+            return Ok((ok, coarse.to_string()));
+        }
 
         let _ = stx.send((ScanState::Waking, 0.0, String::new())).await;
         let _ = stx.send((ScanState::Searching, 0.05, String::new())).await;
@@ -375,57 +456,91 @@ impl Daemon1 {
                     strict != Strictness::Heavy || !e.liveness.confirm.is_empty()
                 };
 
-                if m.accepted && liveness_ok {
+                // The caller gets a coarse answer only (1B-2); the
+                // detailed reason goes to the audit log, where the
+                // machine owner -- not the calling process -- reads it.
+                // Match problems and liveness problems have different
+                // fixes (re-enroll vs light/pose/strictness), and that
+                // distinction lives in the log, not on the bus.
+                let detail = if templates.is_empty() {
+                    format!(
+                        "face captured ({}), but no {} templates enrolled — re-enroll needed",
+                        if e.spectrum.is_empty() {
+                            "unknown spectrum"
+                        } else {
+                            &e.spectrum
+                        },
+                        if e.spectrum.is_empty() {
+                            "matching"
+                        } else {
+                            &e.spectrum
+                        },
+                    )
+                } else if !m.accepted {
+                    format!(
+                        "face captured, but not recognized ({} of {} votes)",
+                        m.passes, m.considered
+                    )
+                } else if !e.liveness.deny.is_empty() {
+                    format!(
+                        "face matches, but unlock would fail: liveness veto ({})",
+                        e.liveness.deny.join("+")
+                    )
+                } else if cfg.require_attention && !e.liveness.attention_ok {
+                    "face matches, but unlock would fail: eyes closed or looking away".to_string()
+                } else {
+                    "face matches, but unlock would fail: no live-face confirmation (try Heavy blink/head motion)".to_string()
+                };
+                let recognised = m.accepted && liveness_ok;
+                log_test(
+                    "test",
+                    &detail,
+                    &e.liveness.deny,
+                    strict.as_str(),
+                    Some(&e.liveness.notes),
+                    e.usable,
+                    e.spectrum.as_str(),
+                    e.luma,
+                );
+                let (ok, coarse) = coarse_test_outcome(recognised, true, true);
+                if ok {
                     let _ = stx
                         .send((ScanState::Matched, 1.0, "Test scan".to_string()))
                         .await;
-                    Ok((true, "recognized enrolled face".to_string()))
                 } else {
                     let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
-                    // Tell the user WHY the unlock would fail: match
-                    // problems and liveness problems have different
-                    // fixes (re-enroll / lower tau vs light, pose,
-                    // strictness). Reason strings mirror session.rs.
-                    let msg = if templates.is_empty() {
-                        format!(
-                            "face captured ({}), but no {} templates enrolled — re-enroll needed",
-                            if e.spectrum.is_empty() {
-                                "unknown spectrum"
-                            } else {
-                                &e.spectrum
-                            },
-                            if e.spectrum.is_empty() {
-                                "matching"
-                            } else {
-                                &e.spectrum
-                            },
-                        )
-                    } else if !m.accepted {
-                        format!(
-                            "face captured, but not recognized ({} of {} votes)",
-                            m.passes, m.considered
-                        )
-                    } else if !e.liveness.deny.is_empty() {
-                        format!(
-                            "face matches, but unlock would fail: liveness veto ({})",
-                            e.liveness.deny.join("+")
-                        )
-                    } else if cfg.require_attention && !e.liveness.attention_ok {
-                        "face matches, but unlock would fail: eyes closed or looking away"
-                            .to_string()
-                    } else {
-                        "face matches, but unlock would fail: no live-face confirmation (try Heavy blink/head motion)".to_string()
-                    };
-                    Ok((false, msg))
                 }
+                Ok((ok, coarse.to_string()))
             }
             Ok(_) => {
                 let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
-                Ok((false, "no face captured".to_string()))
+                log_test(
+                    "test",
+                    "no_face_captured",
+                    &no_cues,
+                    cfg.strictness.as_str(),
+                    None,
+                    0,
+                    "unknown",
+                    None,
+                );
+                let (ok, coarse) = coarse_test_outcome(false, false, true);
+                Ok((ok, coarse.to_string()))
             }
             Err(e) => {
                 let _ = stx.send((ScanState::Rejected, 0.0, String::new())).await;
-                Ok((false, e.to_string()))
+                log_test(
+                    "test",
+                    &e.to_string(),
+                    &no_cues,
+                    cfg.strictness.as_str(),
+                    None,
+                    0,
+                    "unknown",
+                    None,
+                );
+                let (ok, coarse) = coarse_test_outcome(false, false, false);
+                Ok((ok, coarse.to_string()))
             }
         }
     }
@@ -436,12 +551,19 @@ impl Daemon1 {
     /// unlock anything, touch the failure counter or change a setting.
     /// The requested identity name is sanitised and merely shown in the
     /// greeting; it is never trusted for anything.
+    ///
+    /// Polkit-gated on org.faceidnim.test like TestScan: otherwise any
+    /// local process (including a remote/inactive session) could paint
+    /// a fake "matched + Welcome <name>" on someone else's lock screen.
+    /// Promptless for the local active session, so the dev workflow of
+    /// tuning the animation without standing at the screen is unchanged.
     async fn preview_animation(
         &self,
         user: String,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _uid = self.caller_uid(&hdr).await?;
+        authz::require_polkit(&self.conn, &hdr, authz::ACTION_TEST).await?;
         let name: String = user.chars().filter(|c| !c.is_control()).take(24).collect();
         let ctxt = SignalContext::new(&self.conn, "/org/faceidnim/Daemon1")
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
@@ -487,10 +609,26 @@ impl Daemon1 {
         json: String,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
-        authz::require_polkit(&self.conn, &hdr, authz::ACTION_SETTINGS).await?;
         let mut incoming: Config = serde_json::from_str(&json)
             .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         incoming.validate();
+        // H3/O1/O5: two-tier authorization. Cosmetic changes go through
+        // ACTION_SETTINGS (auth_self); any change to a protected key
+        // (enabled, tau, strictness, votes, allowed services, lockout
+        // policy, attention) additionally requires ACTION_SETTINGS_SECURE
+        // (auth_admin). Checking the *diff* — not mere presence — stops
+        // smuggling protected keys through the weaker action while a
+        // no-op resend of identical values stays frictionless.
+        let protected = {
+            let cur = self.cfg.lock().await;
+            cur.protected_settings_changed(&incoming)
+        };
+        if protected.is_empty() {
+            authz::require_polkit(&self.conn, &hdr, authz::ACTION_SETTINGS).await?;
+        } else {
+            authz::require_polkit(&self.conn, &hdr, authz::ACTION_SETTINGS_SECURE).await?;
+            tracing::info!(keys = ?protected, "privileged settings change authorized");
+        }
         // Paths are daemon-owned. Accepting them over D-Bus would let a
         // caller point the template store anywhere.
         let mut cur = self.cfg.lock().await;
@@ -583,22 +721,17 @@ impl Daemon1 {
 
     /// Opt-in lock/unlock timeline as JSON (newest last, max 200).
     /// Only lock/unlock services are ever stored; sudo/polkit never is.
-    async fn get_timeline(&self) -> zbus::fdo::Result<String> {
+    /// Scoped to the calling user: every row carries the uid it was
+    /// recorded for, and a caller sees only their own rows (1B-1).
+    async fn get_timeline(
+        &self,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let uid = self.caller_uid(&hdr).await?;
         let cfg = self.cfg.lock().await.clone();
         let path = cfg.timeline_log;
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().collect();
-        let tail = if lines.len() > 200 {
-            &lines[lines.len() - 200..]
-        } else {
-            &lines[..]
-        };
-        let mut out = Vec::with_capacity(tail.len());
-        for l in tail {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
-                out.push(v);
-            }
-        }
+        let out = timeline_rows_for_caller(&text, uid);
         serde_json::to_string(&out).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
@@ -778,5 +911,184 @@ pub async fn run_signal_pump(conn: Connection, mut rx: mpsc::Receiver<(ScanState
         if let Err(e) = Daemon1::scan_state(&ctxt, state.as_str(), progress as f64, &reason).await {
             tracing::debug!("scan_state emit failed: {e}");
         }
+    }
+}
+
+/// Parse the tail of a timeline JSONL file into the rows one caller may
+/// see: at most the last 200 lines, JSON-parseable, and recorded for
+/// `uid`. Rows without a matching numeric `uid` field are dropped rather
+/// than leaked (fail closed: the writer always records a uid, so a
+/// missing one means a foreign or corrupt line).
+pub fn timeline_rows_for_caller(text: &str, uid: u32) -> Vec<serde_json::Value> {
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = if lines.len() > 200 {
+        &lines[lines.len() - 200..]
+    } else {
+        &lines[..]
+    };
+    let mut out = Vec::with_capacity(tail.len());
+    for l in tail {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
+            if v.get("uid").and_then(|u| u.as_u64()) == Some(uid as u64) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Minimum gap between two TestScan calls from the same uid (1B-2): a
+/// looping process must not be able to hold the camera continuously.
+/// A refusal here is not a failed unlock and never touches the face
+/// unlock lockout counter.
+pub const TEST_SCAN_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Per-uid TestScan throttle, kept out of the D-Bus handler so it is
+/// unit-testable without a bus connection.
+#[derive(Default)]
+pub struct TestScanLimiter {
+    last: HashMap<u32, std::time::Instant>,
+}
+
+impl TestScanLimiter {
+    /// True when `uid` may scan now (and records the attempt); false
+    /// when the previous scan is still inside the minimum interval.
+    /// Uids are independent: one user's Test button never throttles
+    /// another's.
+    pub fn allow(&mut self, uid: u32, now: std::time::Instant) -> bool {
+        if let Some(t) = self.last.get(&uid) {
+            if now.duration_since(*t) < TEST_SCAN_MIN_INTERVAL {
+                return false;
+            }
+        }
+        self.last.insert(uid, now);
+        true
+    }
+}
+
+/// Caller-facing TestScan outcome (1B-2): the caller learns whether a
+/// scan would recognise them, never vote counts or cue names
+/// (SECURITY.md invariant 2: success or failure only, no per-cue
+/// breakdown). The detailed reason stays in the audit log, where the
+/// machine owner -- not the calling process -- can read it.
+pub fn coarse_test_outcome(
+    recognised: bool,
+    face_captured: bool,
+    worker_ok: bool,
+) -> (bool, &'static str) {
+    if recognised {
+        (true, "recognised")
+    } else if !worker_ok {
+        (false, "service unavailable")
+    } else if !face_captured {
+        (false, "no face found")
+    } else {
+        (false, "not recognised")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(uid: u32, service: &str) -> String {
+        serde_json::json!({"ts": 1, "uid": uid, "service": service, "result": "success"})
+            .to_string()
+    }
+
+    /// 1B-1 regression: a caller must never see another user's rows.
+    #[test]
+    fn timeline_is_scoped_to_the_calling_uid() {
+        let text = [row(1000, "gdm-password"), row(1001, "login")].join("\n");
+        let mine = timeline_rows_for_caller(&text, 1000);
+        assert_eq!(mine.len(), 1, "caller 1000 must see exactly their own row");
+        assert_eq!(mine[0]["uid"], 1000);
+        assert!(
+            !mine
+                .iter()
+                .any(|v| v.get("uid").and_then(|u| u.as_u64()) == Some(1001)),
+            "uid 1001's rows must never reach uid 1000"
+        );
+    }
+
+    /// Rows without a uid, and corrupt lines, are dropped, not leaked.
+    #[test]
+    fn timeline_drops_uidless_and_corrupt_rows() {
+        let text = [
+            row(1000, "gdm-password"),
+            r#"{"ts":1,"service":"login","result":"success"}"#.to_string(),
+            "not json at all".to_string(),
+        ]
+        .join("\n");
+        let mine = timeline_rows_for_caller(&text, 1000);
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["uid"], 1000);
+    }
+
+    /// 1B-2 regression: TestScan answers in four coarse strings only.
+    /// No vote counts, no cue names -- SECURITY.md invariant 2.
+    #[test]
+    fn test_scan_answers_are_coarse() {
+        assert_eq!(coarse_test_outcome(true, true, true), (true, "recognised"));
+        assert_eq!(
+            coarse_test_outcome(false, true, true),
+            (false, "not recognised")
+        );
+        assert_eq!(
+            coarse_test_outcome(false, false, true),
+            (false, "no face found")
+        );
+        assert_eq!(
+            coarse_test_outcome(false, false, false),
+            (false, "service unavailable")
+        );
+        for (r, f, w) in [
+            (true, true, true),
+            (false, true, true),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            let (ok, s) = coarse_test_outcome(r, f, w);
+            assert_eq!(ok, r && f && w, "ok only when everything held");
+            assert!(
+                !s.chars().any(|c| c.is_ascii_digit()),
+                "no vote counts in caller string: {s}"
+            );
+            for cue in [
+                "moire",
+                "glare",
+                "antispoof",
+                "planar",
+                "parallax",
+                "blink",
+                "attention",
+                "veto",
+                "votes",
+            ] {
+                assert!(!s.contains(cue), "no cue detail in caller string: {s}");
+            }
+        }
+    }
+
+    /// 1B-2 regression: one TestScan per uid per interval; uids are
+    /// independent; the window re-opens afterwards.
+    #[test]
+    fn test_scan_rate_limit_throttles_loops() {
+        use std::time::{Duration, Instant};
+        let mut lim = TestScanLimiter::default();
+        let t0 = Instant::now();
+        assert!(lim.allow(1000, t0), "first scan allowed");
+        assert!(
+            !lim.allow(1000, t0 + Duration::from_secs(1)),
+            "loop refused"
+        );
+        assert!(
+            lim.allow(1001, t0 + Duration::from_secs(1)),
+            "other uid unaffected"
+        );
+        assert!(
+            lim.allow(1000, t0 + TEST_SCAN_MIN_INTERVAL + Duration::from_secs(1)),
+            "window re-opens"
+        );
     }
 }

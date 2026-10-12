@@ -83,3 +83,17 @@
     color: @accent_bg_color;
     background: none;
 }
+
+/* Selected animation row: blue accent left border + subtle tint.
+ * Text/icon convey the state too (✓ in the title), never color alone. */
+.active-opening {
+    border-left: 3px solid @accent_bg_color;
+    background: alpha(@accent_bg_color, 0.08);
+    border-radius: 0 12px 12px 0;
+}
+
+/* Inline opening preview swatch. */
+.opening-preview {
+    background: alpha(@window_fg_color, 0.04);
+    border-radius: 12px;
+}

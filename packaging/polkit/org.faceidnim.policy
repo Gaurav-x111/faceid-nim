@@ -42,25 +42,60 @@
     </defaults>
   </action>
 
-  <!-- Deleting your own biometric data should never be harder than
-       creating it. -->
+  <!-- H3/O1/O5: security-sensitive settings (enabled state, threshold,
+       liveness strictness, vote counts, allowed PAM services, lockout
+       policy) need an admin password. The daemon's SetSettings demands
+       this action whenever a protected key actually changes, so the
+       general settings action above cannot be used to smuggle them
+       through a weaker policy. -->
+  <action id="org.faceidnim.settings-secure">
+    <description>Change security-sensitive face unlock settings</description>
+    <message>Administrator authentication is required to change security-sensitive face unlock settings</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- H9: deleting your own biometric data needs your own password
+       (auth_self) — promptless (yes) was too weak, auth_admin would
+       make wiping your own face harder than creating it. -->
   <action id="org.faceidnim.delete">
     <description>Remove enrolled face data</description>
     <message>Authentication is required to remove face data</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
-      <allow_active>yes</allow_active>
+      <allow_active>auth_self</allow_active>
     </defaults>
   </action>
 
+  <!-- H9: enabling/disabling PAM integration changes how the machine
+       authenticates, so it needs an admin password. -->
   <action id="org.faceidnim.enable">
     <description>Enable or disable face unlock in PAM</description>
-    <message>Authentication is required to change PAM face unlock</message>
+    <message>Administrator authentication is required to change PAM face unlock</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
-      <allow_active>auth_self</allow_active>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- A diagnostic scan still opens the camera, so it needs a polkit
+       decision — but the Test button must stay smooth, so the local
+       active session is allowed without a password prompt. Remote and
+       inactive sessions are denied: the camera must not open for
+       someone not at this machine. (1B-2: TestScan used to run for any
+       same-uid caller with no authorization check at all.) -->
+  <action id="org.faceidnim.test">
+    <description>Run a face unlock test scan</description>
+    <message>Authentication is required to run a face unlock test scan</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
     </defaults>
   </action>
 </policyconfig>

@@ -28,7 +28,7 @@ Usage: faceid-nim <command> [options]
   audit             Show recent auth audit events (requires root)
   timeline          Show opt-in lock/unlock timeline (requires root)
   check-updates     Check models/manifest for updates (no download)
-  ir-emitter        Probe/enable the IR emitter (needs linux-enable-ir-emitter)
+  ir-emitter        Report IR sensor + illuminator status (probe-only)
   devices           List /dev/video* with RGB/IR classification
 
 Face unlock is enabled in the Face Unlock app, not here.
@@ -51,6 +51,21 @@ unit_state() {
     active="$(systemctl is-active "$1" 2>/dev/null || true)"
     enabled="$(systemctl is-enabled "$1" 2>/dev/null || true)"
     echo "${active:-unknown} (${enabled:-unknown})"
+}
+
+dbus_name_state() {
+    # Owned means the daemon actually claimed its UI bus name. MISSING
+    # is a problem even when the unit reports active: the daemon keeps
+    # serving PAM without the bus (e.g. its policy file failed to load
+    # and the name claim was denied), and every app preview that needs
+    # the bus then fails with ServiceUnknown.
+    if ! command -v busctl >/dev/null 2>&1; then
+        echo "unknown (no busctl)"
+    elif busctl --system list 2>/dev/null | grep -q org.faceidnim.Daemon1; then
+        echo "owned"
+    else
+        echo "MISSING - daemon not on the bus (service unavailable)"
+    fi
 }
 
 config_flag() {
@@ -88,15 +103,44 @@ case "$cmd" in
         echo "  faceid-nimd    : $(unit_state faceid-nimd.service)"
         echo "  faceid-vision  : $(unit_state faceid-vision.service)"
         echo "  fetch-models   : $(unit_state faceid-nim-fetch-models.service)"
+        echo "  D-Bus name org.faceidnim.Daemon1 : $(dbus_name_state)"
         echo
         echo "Sockets"
-        for s in /run/faceid-nim/auth.sock /run/faceid-nim/worker/vision.sock; do
-            if [ -S "$s" ]; then
-                echo "  $s : present"
+        # Audit 2026-10-06: the worker dir is 0770 root:faceid, so a
+        # non-root caller cannot even traverse it -- and a plain -S
+        # test then reports MISSING for a live worker. Distinguish
+        # "absent" from "invisible" instead of implying the worker
+        # is down.
+        sock_state() {
+            if [ -S "$1" ]; then
+                echo "present"
+            elif [ ! -x "$(dirname "$1")" ]; then
+                echo "not visible (permission denied - run as root to check)"
             else
-                echo "  $s : MISSING"
+                echo "MISSING"
             fi
+        }
+        # Readiness, not just aliveness: the worker binds its socket
+        # ~60 s after the unit reports active (model/mediapipe init), so
+        # active+MISSING is "starting", not "down".
+        worker_readiness() {
+            vsock="$(sock_state /run/faceid-nim/worker/vision.sock)"
+            vunit="$(unit_state faceid-vision.service)"
+            case "$vunit" in
+                active*)
+                    case "$vsock" in
+                        present) echo "ready (service active, socket bound)" ;;
+                        *"permission"*) echo "$vsock" ;;
+                        *) echo "starting (service active, socket not bound yet - wait ~60s and re-run)" ;;
+                    esac
+                    ;;
+                *) echo "$vsock (service: $vunit)" ;;
+            esac
+        }
+        for s in /run/faceid-nim/auth.sock /run/faceid-nim/worker/vision.sock; do
+            echo "  $s : $(sock_state "$s")"
         done
+        echo "  worker readiness : $(worker_readiness)"
         echo
         echo "Models"
         if [ -x "$LIBEXEC/verify-models" ]; then
@@ -157,7 +201,12 @@ print(f'  ir sensor      : '
       f'{"configured" if c.get("ir") else "not configured"}')
 PY
         else
-            echo "  worker not running; cannot report what is active"
+            case "$(sock_state /run/faceid-nim/worker/vision.sock)" in
+                *permission*)
+                    echo "  worker status unknown (permission denied - run as root to check)" ;;
+                *)
+                    echo "  worker not running; cannot report what is active" ;;
+            esac
         fi
         echo
         echo "Config ($CONFIG)"
@@ -170,6 +219,31 @@ PY
             echo "  ir_camera      : $(config_flag ir_camera)"
         else
             echo "  not readable (run as root to see it)"
+        fi
+        echo
+        echo "Animation (what the user actually sees)"
+        _home="${HOME:-}"
+        if [ -z "$_home" ] && [ -n "${SUDO_USER:-}" ]; then
+            _home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
+        fi
+        if [ -n "$_home" ] && [ -d "$_home/.local/share/gnome-shell/extensions/faceid@nim" ]; then
+            echo "  shell extension: SHADOWED by $_home/.local/share/gnome-shell/extensions/faceid@nim"
+            echo "                   (GNOME loads the user copy, not /usr/share — reinstalls look like no-ops until it is removed/updated and the shell restarts)"
+        else
+            echo "  shell extension: system (/usr/share/gnome-shell/extensions/faceid@nim)"
+        fi
+        if [ -n "$_home" ] && [ -f "$_home/.local/share/applications/org.faceidnim.App.desktop" ]; then
+            echo "  settings app   : SHADOWED by user desktop entry (runs the dev tree via ~/.local/bin/faceid-app)"
+        else
+            echo "  settings app   : system (/usr/bin/faceid-app)"
+        fi
+        if [ -n "$_home" ] && [ -f "$_home/.config/faceid-nim/openings.json" ]; then
+            _active="$(awk -F'"' '/\"active\"/ {print $4; exit}' "$_home/.config/faceid-nim/openings.json" 2>/dev/null || true)"
+            _face="$(awk -F'"' '/\"scan_face\"/ {print $4; exit}' "$_home/.config/faceid-nim/openings.json" 2>/dev/null || true)"
+            echo "  active animation: ${_active:-unknown} (scan_face: ${_face:-unknown})"
+            echo "                   (app preview: Gtk.Video/Cairo · lock: PNG frames/Clutter — see docs/animation-runtime-audit.md)"
+        else
+            echo "  active animation: iphone (packaged default)"
         fi
         echo
         echo "PAM profile"

@@ -7,8 +7,10 @@ it is the reason IR laptops are meaningfully harder to spoof than
 RGB-only ones.
 
 Most IR cameras need their emitter enabled with a vendor-specific UVC
-command; see the linux-enable-ir-emitter project. Capability must be
-detected at runtime -- never assume IR exists.
+command, and no generic Linux interface exists for that -- so an IR
+node can be present and still deliver black frames (see
+'faceid-nim ir-emitter --probe' for what this machine actually has).
+Capability must be detected at runtime -- never assume IR exists.
 """
 from __future__ import annotations
 

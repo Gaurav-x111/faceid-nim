@@ -1,7 +1,7 @@
 # Universal / zero-config setup — findings and plan
 
-Status: **IMPLEMENTED, 2026-09-26**, except the two items called out in
-Part 7 below. This document was written as a plan after a full read of
+Status: **IMPLEMENTED, 2026-09-26**, plus the MiniFASNet pin
+(2026-10-07); only the tau item in Part 7 below is still open. This document was written as a plan after a full read of
 the codebase and is kept as the record of *why* each change was made --
 read Part 2 before changing any of it, because the failure it describes
 is invisible from the code alone.
@@ -10,10 +10,10 @@ What landed: `hardware.py`, `rt.py`, `cameras.py`, the landmarks backend
 registry, `optional` in the manifest, real model provisioning in postinst
 plus `faceid-nim-fetch-models.service`, `models_ready` in Diagnostics,
 the conditional GPU drop-in, the live `status`/app capability reporting,
-and the arm64-tolerant venv build. See the 1.1.1-1 changelog entry.
+the arm64-tolerant venv build, and the pinned MiniFASNet-V2 anti-spoof
+model. See the 1.1.1-1 changelog entry.
 
-Still open: first-run automatic tau calibration (Part 7), and the
-MiniFASNet licence decision (Part 3, Step 3).
+Still open: first-run automatic tau calibration (Part 7).
 
 ## Goal
 
@@ -396,11 +396,14 @@ separation, and write tau through the existing polkit-gated
 `eval/far_frr.py` already degrades honestly on small samples and that
 behaviour must be preserved.
 
-### 7.2 MiniFASNet licence (Step 3, still undecided)
-No stably-hosted permissively-licensed ONNX export is known, so the
-manifest entry is unpinned and `resolve_optional()` refuses it. The
-`antispoof_model` deny cue therefore never fires. This is now reported
-honestly in `faceid-nim status`, in Diagnostics and in the app -- no
-surface claims the check is running. Either pin a licensed export or
-leave it reported as unavailable; the second is the current, working
-state.
+### 7.2 MiniFASNet licence (Step 3, DONE 2026-10-07)
+Pinned: `models/manifest.toml [model.antispoof]` now points at the
+garciafido `minifasnet-v2-anti-spoofing-onnx` export (Apache-2.0, same
+as upstream minivision-ai), SHA-256
+`d7b3cd9b…eecc7b`, 1.74 MB. Interface verified against the worker:
+`(batch,3,80,80)` BGR `[0,1]` in, 3 logits out with index 1 = live,
+scale 2.7 -- exactly what `passive.py` already expects, so no code
+change was needed. The `antispoof_model` deny cue now fires as one vote
+among several. Upstream `.pth` provenance and the hash are recorded in
+the manifest comment; re-verify with `sha256sum` before trusting a
+re-export.

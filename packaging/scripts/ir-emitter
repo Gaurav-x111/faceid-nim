@@ -1,82 +1,197 @@
 #!/bin/sh
-# ir-emitter -- probe and enable the IR emitter for faceid-nim.
+# ir-emitter -- report the real IR emitter situation for faceid-nim.
 #
-# Most IR cameras need a vendor-specific UVC command to turn the emitter
-# on; see the linux-enable-ir-emitter project (Suggested by the .deb).
-# This helper never fails hard: without an emitter the daemon simply
-# uses passive IR cues (analyse_ir_face), which is weaker but safe.
+# WHY THIS SCRIPT NO LONGER OFFERS TO "ENABLE" ANYTHING
+# ---------------------------------------------------
+# It used to say: "sudo apt install linux-enable-ir-emitter". That
+# package does not exist in any Ubuntu repository. Verified on noble:
+#
+#   $ apt-cache policy linux-enable-ir-emitter
+#     Candidate: (none)
+#   $ apt-cache search ir-emitter
+#     (no output)
+#
+# So the old advice could never work on any machine, and the old
+# `Suggests: linux-enable-ir-emitter` in debian/control named a package
+# apt cannot resolve. Both are gone rather than left as a dead end.
+#
+# WHAT IS ACTUALLY TRUE
+# --------------------
+# Two independent things are often conflated as "IR does not work":
+#
+#   1. An IR SENSOR node. Plenty of combo webcams expose a monochrome
+#      V4L2 node (GREY/Y10/Y12/Y16). faceid-nim detects these on its
+#      own (faceid_vision.cameras.MONO_FIVECC) and will happily use the
+#      node. Detection is not the problem.
+#
+#   2. An IR ILLUMINATOR (the emitter LEDs). Without the LEDs lit, an
+#      IR sensor returns near-black frames. This is a vendor-specific
+#      UVC extension-unit control, it is per-device, and there is no
+#      generic Linux interface for it. Nothing in this package can
+#      turn it on for you.
+#
+# So the honest summary is: if the probe below finds a monochrome node
+# but no emitter tool, the node is PRESENT and the ILLUMINATION is not,
+# and IR/hybrid mode will see black frames until the LEDs are driven.
+# Passive IR cues still work; the daemon degrades rather than fails.
 #
 # Installed as /usr/libexec/faceid-nim/ir-emitter.
-# Usage: ir-emitter [--probe|--enable|--status]
+# Usage: ir-emitter [--probe|--status]
 set -eu
 
 MODE="${1:---probe}"
 
-probe() {
-    echo "IR emitter probe"
-    echo "================"
-    if command -v linux-enable-ir-emitter >/dev/null 2>&1; then
-        echo "  tool: linux-enable-ir-emitter found"
-        linux-enable-ir-emitter --help 2>&1 | head -n 5 || true
-    else
-        echo "  tool: linux-enable-ir-emitter NOT installed"
-        echo "        sudo apt install linux-enable-ir-emitter (see Suggests)"
+# Monochrome fiveccs, kept in step with faceid_vision.cameras.MONO_FIVECC.
+MONO_RE='GREY|Y8 |Y10|Y12|Y14|Y16|Y8I|Y10I|Y12I|Y16I|Z16|Z14'
+# Colour fiveccs: the complement that tells a real sensor from a
+# do-everything virtual device.
+COLOUR_RE='MJPG|JPEG|YUYV|YV12|NV12|NV21|H264|VP80|VP90|AV1|BGR|RGB|AR24|XR24|AB24|R444|BGR4|RGB4|RGB1|BGR3|RGB3|3BYR'
+
+have_v4l() { command -v v4l2-ctl >/dev/null 2>&1; }
+
+# Print the card name for a node, or "unknown".
+card_of() {
+    v4l2-ctl -d "$1" --info 2>/dev/null |
+        sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p' |
+        head -n 1 | sed 's/[[:space:]]*$//' || true
+}
+
+# Classify a node.
+#
+# The important subtlety: a node that offers BOTH monochrome and colour
+# formats is NOT an IR sensor, it is a general-purpose or virtual device.
+# A v4l2loopback node enumerates dozens of pixel formats including GREY,
+# so grepping for GREY alone misreports it as infrared. A real IR sensor
+# exposes monochrome formats and nothing else -- which is the same test
+# faceid_vision.cameras uses (see the MONO_FIVECC comment).
+#
+# Emits: ir | rgb | virtual | node | unknown
+classify() {
+    _dev="$1"
+    _fmts="$(v4l2-ctl -d "$_dev" --list-formats-ext 2>/dev/null || true)"
+    if [ -z "$_fmts" ]; then
+        # No formats enumerable: either no permission, or a metadata node
+        # that exposes no capture formats at all.
+        if v4l2-ctl -d "$_dev" --all 2>/dev/null | grep -q "Device Caps"; then
+            echo unknown
+        else
+            echo node
+        fi
+        return
     fi
+    _mono=no
+    _colour=no
+    printf '%s' "$_fmts" | grep -Eq "'($MONO_RE)'" && _mono=yes
+    printf '%s' "$_fmts" | grep -Eq "'($COLOUR_RE)'" && _colour=yes
+    if [ "$_mono" = yes ] && [ "$_colour" = no ]; then
+        echo ir
+    elif [ "$_mono" = yes ]; then
+        echo virtual
+    elif [ "$_colour" = yes ]; then
+        echo rgb
+    else
+        echo unknown
+    fi
+}
+
+probe() {
+    echo "IR emitter status"
+    echo "=================="
+
+    # -- 1. illuminator control -------------------------------------
+    if command -v linux-enable-ir-emitter >/dev/null 2>&1; then
+        echo "  emitter tool : linux-enable-ir-emitter FOUND"
+        echo "                 (third-party; this package does not ship it)"
+    else
+        echo "  emitter tool : none"
+        echo "                 linux-enable-ir-emitter is NOT packaged for"
+        echo "                 Ubuntu (apt-cache policy: no candidate), so"
+        echo "                 there is nothing to install and no supported"
+        echo "                 way to drive the LEDs from here."
+    fi
+
+    # -- 2. sensor nodes --------------------------------------------
     echo
-    echo "Video nodes:"
+    if ! have_v4l; then
+        echo "  v4l2-ctl not found; install v4l-utils to classify nodes."
+        echo
+        echo "  Verdict: UNKNOWN (cannot inspect nodes)"
+        return 0
+    fi
+
+    found_ir=0
+    echo "  video nodes:"
     for dev in /dev/video*; do
         [ -c "$dev" ] || continue
-        if command -v v4l2-ctl >/dev/null 2>&1; then
-            card="$(v4l2-ctl -d "$dev" --info 2>/dev/null | grep 'Card type' | cut -d: -f2 | xargs || echo unknown)"
-            if v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null | grep -q GREY; then
-                echo "  $dev: IR-capable? ($card)"
-            else
-                echo "  $dev: RGB ($card)"
-            fi
-        else
-            echo "  $dev (install v4l-utils for classification)"
-        fi
+        card="$(card_of "$dev")"
+        [ -n "$card" ] || card="unknown"
+        case "$(classify "$dev")" in
+            ir)
+                found_ir=1
+                echo "    $dev  IR sensor (monochrome only)   [$card]"
+                ;;
+            rgb)
+                echo "    $dev  RGB camera                   [$card]"
+                ;;
+            virtual)
+                echo "    $dev  virtual/loopback, not a real sensor  [$card]"
+                ;;
+            node)
+                echo "    $dev  no capture formats           [$card]"
+                ;;
+            *)
+                echo "    $dev  unclassified                 [$card]"
+                ;;
+        esac
     done
+
     echo
-    if [ -r /sys/bus/usb/devices ] && ls /sys/bus/usb/devices/*/product 1>/dev/null 2>&1; then
-        echo "USB cameras:"
-        for p in /sys/bus/usb/devices/*/product; do
-            echo "  $(cat "$p" 2>/dev/null || echo unknown)"
-        done
-    fi
-}
-
-enable() {
-    need_root_enable
-    if command -v linux-enable-ir-emitter >/dev/null 2>&1; then
-        echo "Enabling IR emitter (one-shot; re-run after reboot if needed)..."
-        linux-enable-ir-emitter run "$@" || {
-            echo "ir-emitter: enable failed; passive IR still works" >&2
-            exit 1
-        }
-        echo "IR emitter enable attempted. Verify with: sudo faceid-nim ir-emitter --probe"
+    # -- 3. verdict -------------------------------------------------
+    if ! command -v linux-enable-ir-emitter >/dev/null 2>&1; then
+        if [ "$found_ir" -eq 1 ]; then
+            echo "  Verdict: IR SENSOR PRESENT, ILLUMINATION UNAVAILABLE."
+            echo "           The node above is real and faceid-nim will select"
+            echo "           it, but with the IR LEDs off it delivers black"
+            echo "           frames, so IR and hybrid mode cannot match against"
+            echo "           it. Passive IR cues still work and the daemon"
+            echo "           degrades instead of failing."
+            echo
+            echo "           To fix, the illuminator must be driven by a"
+            echo "           vendor-specific UVC control for THIS camera."
+            echo "           There is no generic Linux interface for that, and"
+            echo "           this package deliberately does not guess."
+        else
+            echo "  Verdict: NO IR SENSOR on this machine."
+            echo "           Use camera_mode = \"rgb\" or \"auto\"; faceid-nim"
+            echo "           will not select a monochrome node that is absent."
+        fi
+    elif [ "$found_ir" -eq 1 ]; then
+        echo "  Verdict: IR sensor and an emitter tool are both present."
+        echo "           Enabling the LEDs is vendor-specific and out of"
+        echo "           scope for this package; see the tool's own --help."
     else
-        echo "ir-emitter: linux-enable-ir-emitter not installed." >&2
-        echo "  sudo apt install linux-enable-ir-emitter" >&2
-        echo "  Without it, Hybrid/IR falls back to passive IR cues." >&2
-        exit 2
+        echo "  Verdict: emitter tool present but NO IR SENSOR node found."
     fi
-}
-
-need_root_enable() {
-    [ "$(id -u)" -eq 0 ] || {
-        echo "ir-emitter --enable needs root (try: sudo faceid-nim ir-emitter --enable)" >&2
-        exit 1
-    }
 }
 
 case "$MODE" in
     --probe|--status|-s|"") probe ;;
-    --enable|-e) shift; enable "$@" ;;
     -h|--help|help)
-        echo "Usage: ir-emitter [--probe|--enable|--status]"
-        echo "  --probe   list IR-capable nodes and tool presence (default)"
-        echo "  --enable  run linux-enable-ir-emitter (needs root)"
+        echo "Usage: ir-emitter [--probe|--status]"
+        echo "  --probe   report emitter tool + IR sensor nodes + verdict (default)"
+        echo
+        echo "There is no --enable: driving the IR illuminator needs a"
+        echo "vendor-specific UVC control for your camera, and no such tool"
+        echo "is packaged for Ubuntu."
+        ;;
+    --enable|-e)
+        echo "ir-emitter: --enable has been removed." >&2
+        echo "  The IR illuminator needs a vendor-specific UVC extension-unit" >&2
+        echo "  control for your camera. linux-enable-ir-emitter, which this" >&2
+        echo "  used to tell you to apt install, is not packaged for Ubuntu," >&2
+        echo "  so that instruction could never work." >&2
+        echo "  Run 'ir-emitter --probe' for what your machine actually has." >&2
+        exit 2
         ;;
     *) echo "ir-emitter: unknown option $MODE" >&2; exit 2 ;;
 esac

@@ -16,6 +16,34 @@ MANIFEST="${FACEID_MANIFEST:-/usr/share/faceid-nim/models/manifest.toml}"
 MODEL_DIR="${FACEID_MODEL_DIR:-/var/lib/faceid-nim/models}"
 FORCE=0
 
+# H7: a root-run downloader must not obey arbitrary environment
+# overrides or contact arbitrary hosts. When euid is 0, the manifest
+# must live under the packaged/system tree and the model dir under the
+# state tree; anything else aborts instead of downloading as root.
+if [ "$(id -u)" -eq 0 ]; then
+    case "$MANIFEST" in
+        /usr/share/faceid-nim/*|/etc/faceid-nim/*) ;;
+        *) echo "fetch-models: refusing root run with manifest outside /usr/share/faceid-nim or /etc/faceid-nim: $MANIFEST" >&2; exit 1 ;;
+    esac
+    case "$MODEL_DIR" in
+        /var/lib/faceid-nim/*|/var/lib/faceid-nim) ;;
+        *) echo "fetch-models: refusing root run with model dir outside /var/lib/faceid-nim: $MODEL_DIR" >&2; exit 1 ;;
+    esac
+fi
+
+# H7: permitted download hosts. Models come from these publishers only;
+# a manifest pointing anywhere else is refused before any network
+# access. Compare case-insensitively on the URL host.
+host_allowed() {
+    host="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+    case "$host" in
+        github.com|raw.githubusercontent.com|objects.githubusercontent.com|\
+huggingface.co|cdn-lfs.huggingface.co|storage.googleapis.com)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 usage() {
     cat <<USAGE
 Usage: fetch-models [--manifest PATH] [--model-dir PATH] [--force]
@@ -89,6 +117,17 @@ while IFS="$(printf '\t')" read -r name file url sha; do
     fi
 
     [ -n "$url" ] || { echo "  $name: no url= in manifest" >&2; rc=1; continue; }
+
+    # H7: https only, allowlisted host only — before any download.
+    case "$url" in
+        https://*) ;;
+        *) echo "  $name: refusing non-https url" >&2; rc=1; continue ;;
+    esac
+    _host="$(printf '%s' "$url" | sed -e 's|^https://||' -e 's|/.*$||' -e 's|:.*$||')"
+    if ! host_allowed "$_host"; then
+        echo "  $name: refusing download from non-allowlisted host: $_host" >&2
+        rc=1; continue
+    fi
 
     tmp="$(mktemp "$MODEL_DIR/.$file.XXXXXX")"
     trap 'rm -f "$tmp"' EXIT INT TERM

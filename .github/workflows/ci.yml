@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -e './vision[dev]'
-      - run: PYTHONPATH=vision:app pytest -q vision/tests app/tests
+      - run: PYTHONPATH=vision:app pytest -q vision/tests app/tests eval/tests
 
   # The one CI job that would have caught the class of bug that shipped a
   # worker whose build_engine could not run: a syntax error in a module
@@ -89,6 +89,11 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install -e './vision[dev]'
       - name: Replay fixtures
+        # FACEID_DEV=1: fixtures run against whatever models the venv
+        # has, without checksum pins -- acceptable for a CI smoke run
+        # over recorded clips, never a product number. --no-verify is
+        # refused without it (see eval/apcer_bpcer.py).
+        env: { FACEID_DEV: "1" }
         run: |
           if [ -d eval/fixtures ]; then
             python eval/apcer_bpcer.py --root eval/fixtures --strict heavy --no-verify
@@ -101,7 +106,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Parse-check the extension
-        run: for f in shell-ext/faceid@nim/*.js; do node --input-type=module --check < "$f"; done
+        run: for f in shell-ext/faceid@nim/*.js faceid-nim-dynamic-island/faceid-nim/shell-ext/faceid@nim/*.js; do node --input-type=module --check < "$f"; done
+      - name: Lock screen must stay listen-only (no daemon method calls)
+        run: sh shell-ext/check-listen-only.sh
+      - name: Terminal-state guard unit tests
+        run: node --test shell-ext/tests/test-scan-guard.mjs
+
+  # A published repository with no way to report a vulnerability
+  # privately is a finding, not an oversight (Phase 1, 1D-3). This
+  # fails the build while either placeholder is still present.
+  security-contact:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: SECURITY.md must name a real contact
+        run: |
+          if grep -n "Add a real contact\|<YOUR_CONTACT_EMAIL>" SECURITY.md; then
+            echo "FAIL: SECURITY.md still has a placeholder contact."
+            echo "      Set a reachable address before publishing."
+            exit 1
+          fi
+          echo "security contact present"
 
   # The packaging must stay buildable for BOTH architectures. An arm64
   # .deb is the only way most modern laptops get this at all, and it is
@@ -128,9 +153,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y debhelper python3-all python3-venv \
                                       libpam0g-dev meson ninja-build build-essential
-      # The daemon needs rustc >= 1.75. The runner's apt rustc is older,
-      # and rustup does not register dpkg packages -- which is why the
-      # build below passes DEB_FLAGS=-d.
+      # The daemon needs rustc >= 1.85 (edition2024 crates in the
+      # lockfile). No supported Ubuntu apt toolchain reaches that
+      # (24.04 tops out at 1.75), and rustup does not register dpkg
+      # packages -- which is why the build below passes DEB_FLAGS=-d.
       - name: Install a current Rust toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

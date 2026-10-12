@@ -40,6 +40,20 @@ static long now_ms(void)
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* H6: SO_PEERCRED root check on the daemon connection. Returns 0 only
+ * when the peer credentials are readable and the peer uid is 0. */
+static int verify_server_is_root(int fd)
+{
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    memset(&cred, 0, sizeof(cred));
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
+        return -1;
+    if (len < (socklen_t)sizeof(cred))
+        return -1;
+    return (cred.uid == 0) ? 0 : -1;
+}
+
 static int connect_daemon(const char *path)
 {
     struct sockaddr_un addr;
@@ -59,6 +73,16 @@ static int connect_daemon(const char *path)
         close(fd);
         return -1;
     }
+    /* H6: the socket is world-writable by design (any local user may
+     * ask), so anyone could bind a lookalike path... except the real
+     * path lives in a root-owned directory. Still, verify the peer is
+     * the root daemon via SO_PEERCRED before sending the username:
+     * a spoofed responder must never receive auth requests, and any
+     * verification failure fails closed to password auth. */
+    if (verify_server_is_root(fd) < 0) {
+        close(fd);
+        return -1;
+    }
     return fd;
 }
 
@@ -72,6 +96,12 @@ static void parse_reply(const char *line, struct faceid_reply *out)
 
     out->kind = FID_PROTO;
     out->text[0] = '\0';
+
+    /* H6: fail closed on anything that is not a JSON object line.
+     * Garbage, empty lines, and log fragments are PROTO (→ UNAVAIL),
+     * never OK. */
+    if (!line || line[0] != '{')
+        return;
 
     if (!k)
         return;
