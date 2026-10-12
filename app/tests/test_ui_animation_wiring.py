@@ -131,14 +131,27 @@ def test_preview_plan_source_of_preview_plan():
     assert "DBusProxy" not in src
 
 
-def test_daemon_down_message_actionable():
-    msg = main.daemon_down_message(
-        "GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: "
-        "The name org.faceidnim.Daemon1 was not provided by any "
-        ".service files")
-    assert "systemctl start faceid-nimd" in msg
-    assert "unavailable" in msg.lower()
-    assert "clip previews" in msg.lower()
+def test_service_unknown_maps_to_friendly():
+    """ServiceUnknown (and NameHasNoOwner) show the friendly line with
+    the raw GDBus text kept as the collapsible detail — never masked,
+    never presented as readiness."""
+    for raw in (
+            "GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: "
+            "The name org.faceidnim.Daemon1 was not provided by any "
+            ".service files",
+            "GDBus.Error:org.freedesktop.DBus.Error.NameHasNoOwner: "
+            "Could not activate remote peer",
+            "cannot reach faceid-nimd: ServiceUnknown"):
+        friendly, technical = main.split_daemon_error(raw)
+        assert friendly == ("The face unlock service isn't running. "
+                            "Run: faceid-nim status")
+        assert technical == raw
+    # Unrelated failures pass through unchanged: no masking.
+    friendly, technical = main.split_daemon_error(
+        "GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: nope")
+    assert "AccessDenied" in friendly
+    friendly, technical = main.split_daemon_error("")
+    assert friendly and technical == ""
 
 
 def test_github_icon_and_link():

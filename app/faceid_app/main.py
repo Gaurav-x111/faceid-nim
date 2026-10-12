@@ -191,17 +191,24 @@ def preview_plan_for_state(active: str, state: str, cfg: dict | None = None) -> 
             "heading": spec.get("name") or "Animation", "body": body}
 
 
-def daemon_down_message(error: object) -> str:
-    """Actionable, truthful message for genuinely daemon-dependent
-    operations. Never implies the daemon is connected."""
-    text = str(error or "")
-    if "was not provided" in text or "ServiceUnknown" in text or \
-            "cannot reach" in text:
-        return ("Daemon not running — the face service is unavailable. "
-                "Start it with `sudo systemctl start faceid-nimd` "
-                "(install the .deb first if needed). Clip previews above "
-                "need no daemon.")
-    return f"Daemon unavailable: {text or 'unknown error'}"
+SERVICE_DOWN_FRIENDLY = \
+    "The face unlock service isn't running. Run: faceid-nim status"
+
+
+def split_daemon_error(error: object) -> tuple:
+    """Split a daemon failure into (display, technical).
+
+    ServiceUnknown / NameHasNoOwner (the bus name has no owner: the
+    daemon is stopped, crashed, or its policy never loaded) map to a
+    friendly display line; the raw GDBus text is kept as the technical
+    detail for the collapsible details row. Anything else passes
+    through unchanged so real errors are never masked."""
+    technical = str(error or "")
+    if ("ServiceUnknown" in technical or "NameHasNoOwner" in technical
+            or "was not provided" in technical
+            or "cannot reach" in technical):
+        return (SERVICE_DOWN_FRIENDLY, technical)
+    return (technical or "Daemon unavailable.", technical)
 
 
 def open_url(url: str, launcher=None) -> bool:
@@ -1850,6 +1857,29 @@ class Window(Adw.ApplicationWindow):
             return
         self._play_preview_plan(plan, active)
 
+    def _daemon_error_dialog(self, friendly: str, technical: str) -> None:
+        """Friendly heading up front, raw GDBus text one tap away.
+
+        The technical line stays visible (collapsible, selectable for
+        pasting into a bug report) so mapping never masks a real,
+        different failure."""
+        details = Gtk.Label(label=technical or "(no further detail)",
+                            xalign=0, wrap=True, selectable=True)
+        details.add_css_class("dim-label")
+        details.add_css_class("cli-command")
+        expander = Gtk.Expander(label="Details")
+        expander.set_child(details)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      width_request=420)
+        box.append(expander)
+        dlg = Adw.AlertDialog(heading=friendly,
+                              body="The animation clips above need no "
+                                   "service; only the live lock pill does.",
+                              extra_child=box)
+        dlg.add_response("close", "Close")
+        dlg.connect("response", lambda _d, _r: dlg.close())
+        dlg.present(self)
+
     def _preview_success(self, _b=None) -> None:
         """Daemon-gated: ask the daemon to play the full success
         sequence on the real lock pill (ring, check, Verified,
@@ -1869,13 +1899,17 @@ class Window(Adw.ApplicationWindow):
                 self.daemon.preview_animation(identity)
                 return None
             except Exception as e:
-                return daemon_down_message(e)
+                return split_daemon_error(e)
 
         def then(res):
             if res is None:
                 self.toast("Success animation previewing now")
             else:
-                self.toast(res)
+                friendly, technical = res
+                if friendly == SERVICE_DOWN_FRIENDLY:
+                    self._daemon_error_dialog(friendly, technical)
+                else:
+                    self.toast(friendly)
 
         self._thread(run, then)
 
